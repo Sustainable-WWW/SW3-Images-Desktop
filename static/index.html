@@ -1,0 +1,769 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Free Image Compressor &amp; Resizer for the Web | SW3 Images</title>
+<meta name="description" content="Compress and resize JPG, PNG and WebP images up to 90% smaller with no visible quality loss. Free, no signup — optimize your images for the web in seconds.">
+<!-- TODO once deployed: set the canonical + og:url + og:image to the live domain, e.g. https://images.sustainablewww.se -->
+<!-- <link rel="canonical" href="https://images.sustainablewww.se/"> -->
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="SW3 Images">
+<meta property="og:title" content="Free Image Compressor &amp; Resizer for the Web | SW3 Images">
+<meta property="og:description" content="Compress and resize JPG, PNG and WebP images up to 90% smaller with no visible quality loss. Free, no signup — built in Rust by Sustainable WWW.">
+<meta property="og:locale" content="en_US">
+<meta name="twitter:card" content="summary">
+<meta name="twitter:title" content="Free Image Compressor &amp; Resizer for the Web | SW3 Images">
+<meta name="twitter:description" content="Compress and resize JPG, PNG and WebP images up to 90% smaller with no visible quality loss. Free, no signup.">
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "WebApplication",
+  "name": "SW3 Images",
+  "applicationCategory": "MultimediaApplication",
+  "operatingSystem": "Any (runs in the browser)",
+  "browserRequirements": "Requires JavaScript",
+  "description": "SW3 Images is a free online image compressor and resizer for the web. It compresses JPG, PNG and WebP images up to 90% smaller with no visible quality loss using a perceptually-guided compression algorithm (DSSIM in Lab color space) written in Rust: every candidate file is measured against the original and judged at real viewing size, so quality is measured, not guessed. Images can also be resized to a maximum width with the aspect ratio preserved.",
+  "featureList": [
+    "Compress JPG, PNG and WebP images up to 90% smaller with no visible quality loss",
+    "Optimize images for the web with a perceptually-guided (DSSIM) algorithm written in Rust",
+    "Resize images to a maximum width with aspect ratio preserved, never upscaled",
+    "Batch compression of up to 50 images, 30 MB each",
+    "Strips EXIF and GPS metadata for smaller files and better privacy",
+    "Files auto-delete after 24 hours; originals are never inflated"
+  ],
+  "keywords": "image compressor, compress images online, optimize images for the web, resize images online, reduce image file size, image optimization, JPG compressor, PNG compressor, WebP compressor, groundbreaking image compression algorithm",
+  "offers": { "@type": "Offer", "price": "0", "priceCurrency": "USD" },
+  "creator": [
+    {
+      "@type": "Organization",
+      "name": "Sustainable WWW Sweden AB",
+      "url": "https://sustainablewww.se"
+    },
+    {
+      "@type": "Person",
+      "name": "Michael Andersen",
+      "url": "https://michaelandersen.net",
+      "sameAs": ["https://michaelandersentech.substack.com"]
+    }
+  ],
+  "publisher": {
+    "@type": "Organization",
+    "name": "Sustainable WWW Sweden AB",
+    "url": "https://sustainablewww.se"
+  },
+  "datePublished": "2026-07-21",
+  "inLanguage": "en"
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "How do I optimize images for the web?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Drag and drop up to 10 JPG, PNG or WebP images into SW3 Images (50 with the free unlock), click Compress, and download the results one by one or as a zip. SW3 Images searches for the smallest file that still looks identical to your original — typically 40–90% smaller."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does compressing images reduce their quality?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Not visibly. Every candidate file is measured against your original with DSSIM, a perceptual metric that models human vision, and judged at the size the image is actually viewed on a web page. If quality cannot be preserved, SW3 Images returns your original file instead — it never makes files bigger."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I resize images as well?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Choose 'Resize to max width' and set a pixel width, for example 1024. Every image wider than that is scaled down with its aspect ratio preserved before compression; images are never upscaled."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Which image formats are supported?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "JPEG, PNG and WebP, up to 30 MB per image. The format never changes — a PNG in is a PNG out. JPEGs are re-encoded with mozjpeg, PNGs with imagequant and oxipng, WebP with libwebp at maximum effort."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is it free, and what happens to my images?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "SW3 Images is free and requires no account. Uploads are private, reachable only through an unguessable link, and deleted automatically after 24 hours. Metadata such as EXIF and GPS location is stripped, which shrinks files and protects your privacy."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "What makes the compression algorithm special?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Most tools apply a fixed quality setting. SW3 Images instead runs a perceptually-guided search, written in Rust: it measures structural similarity in Lab color space for every candidate and picks the smallest file below a visually-lossless threshold — quality is measured, not guessed."
+      }
+    }
+  ]
+}
+</script>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 1105 1105'%3E%3Cg stroke='%23027957' stroke-width='80' fill='none' stroke-miterlimit='10'%3E%3Cpath d='m1050.07,552.59c0,276.14-223.86,500-500,500S50.07,828.73,50.07,552.59c0-117.48,42.72-206.16,58.98-235.79C192.39,164.85,363.13,50.65,550.07,52.59c248.84,2.58,500,210.67,500,500Z'/%3E%3Cpath d='m109.04,316.8c53.92,1.59,269.81,14.81,455.69,203.77,181.59,184.6,213.16,413.53,219.75,473.77'/%3E%3Cpath d='m971.77,289.98c-22.45-2.19-149.03-12.02-251.58,96.82-69.89,74.17-91.34,163.9-98.12,199.5'/%3E%3Cpath stroke-linecap='round' d='m174.31,419.48c50.9,12.42,122.17,35.78,198.47,81.98,69.22,41.91,119.45,88.6,153.17,125.12'/%3E%3Cpath stroke-linecap='round' d='m738.07,798.13c38.8-48.38,80.87-109.25,117.39-182.24,32.94-65.83,53.87-126.53,67.44-178.36'/%3E%3Cpath stroke-linecap='round' d='m769.73,970.75c-61-6.91-202.98-32.17-337.53-149.03-95.99-83.37-147.86-178.32-173.76-235.43'/%3E%3C/g%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Poppins:wght@600;700&family=Work+Sans:wght@400;500;600&display=swap">
+<style>
+:root {
+  --green: #027957;
+  --green-hover: #026449;
+  --green-tint: #e8f4ef;
+  --ink: #1e1e1e;
+  --cream: #fefbf6;
+  --text: #393939;
+  --muted: #6f6f6f;
+  --line: #e8e5df;
+  --card: #ffffff;
+  --danger: #c62828;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+html { scroll-behavior: smooth; }
+body {
+  font-family: "Work Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: 17px;
+  color: var(--text);
+  background:
+    radial-gradient(900px 500px at 85% 0%, rgba(2, 121, 87, 0.10), transparent 65%),
+    radial-gradient(700px 420px at 0% 100%, rgba(2, 121, 87, 0.07), transparent 60%),
+    #ffffff;
+  line-height: 1.6;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+h1, h2, h3 { font-family: "Poppins", "Work Sans", sans-serif; color: #000; letter-spacing: -0.01em; }
+main { flex: 1; width: 100%; max-width: 800px; margin: 0 auto; padding: 34px 20px 70px; }
+
+/* Top bar */
+.topbar { display: flex; justify-content: space-between; align-items: center; margin-bottom: 46px; }
+.brand { display: inline-flex; align-items: center; gap: 10px; text-decoration: none; }
+.brand svg { width: 38px; height: 38px; }
+.brand span { font-family: "Poppins", sans-serif; font-weight: 700; font-size: 1.35rem; color: #000; }
+.brand b { color: var(--green); }
+.topbar a.site {
+  font-size: .88rem; font-weight: 600; color: var(--ink); text-decoration: none;
+  border: 1.5px solid var(--ink); border-radius: 100px; padding: 8px 18px;
+  transition: background .15s, color .15s;
+}
+.topbar a.site:hover { background: var(--ink); color: var(--cream); }
+
+/* Hero */
+.hero { margin-bottom: 34px; }
+.badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  border: 1px solid var(--green); color: var(--green);
+  border-radius: 100px; padding: 5px 14px;
+  font-size: .72rem; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  margin-bottom: 18px; background: #fff;
+}
+.badge::before { content: ""; width: 7px; height: 7px; border-radius: 50%; background: var(--green); }
+.hero h1 { font-size: clamp(1.9rem, 5vw, 2.7rem); font-weight: 600; line-height: 1.15; margin-bottom: 14px; }
+.hero p { max-width: 560px; }
+.hero .rust { color: var(--muted); font-size: .92rem; margin-top: 10px; }
+.hero .rust b { color: var(--ink); }
+
+.card {
+  background: var(--card);
+  border: 1px solid var(--line);
+  border-radius: 18px;
+  padding: 24px;
+  margin-bottom: 18px;
+  box-shadow: 0 1px 2px rgba(30, 30, 30, 0.04);
+}
+
+/* Drop zone */
+#dropzone {
+  border: 2px dashed #cfd8d2;
+  border-radius: 14px;
+  padding: 46px 20px;
+  text-align: center;
+  cursor: pointer;
+  transition: border-color .15s, background .15s;
+}
+#dropzone:hover, #dropzone.drag { border-color: var(--green); background: var(--green-tint); }
+#dropzone .dz-icon { font-size: 2.1rem; }
+#dropzone p { margin-top: 8px; }
+#dropzone .hint { color: var(--muted); font-size: .88rem; margin-top: 4px; }
+#dropzone strong { color: var(--green); }
+
+.limit-row { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin-top: 14px; flex-wrap: wrap; }
+#count-label { color: var(--muted); font-size: .9rem; }
+#unlock-toggle {
+  background: none; border: none; color: var(--green); cursor: pointer;
+  font-family: inherit; font-size: .9rem; font-weight: 600; text-decoration: underline; padding: 0;
+}
+
+/* Unlock form */
+#unlock { display: none; margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line); }
+#unlock.open { display: block; }
+#unlock .fields { display: flex; gap: 10px; flex-wrap: wrap; }
+#unlock input {
+  flex: 1 1 180px; padding: 11px 14px; border: 1.5px solid var(--line);
+  border-radius: 10px; background: #fff; color: var(--text);
+  font-family: inherit; font-size: .95rem;
+}
+#unlock input:focus { outline: none; border-color: var(--green); }
+#unlock .note { color: var(--muted); font-size: .8rem; margin-top: 8px; }
+#unlock-badge { display: none; margin-top: 12px; font-size: .9rem; color: var(--green); font-weight: 600; }
+.hp { position: absolute; left: -9999px; top: -9999px; height: 1px; width: 1px; overflow: hidden; }
+
+/* File list */
+#files { list-style: none; }
+#files li {
+  display: grid;
+  grid-template-columns: minmax(0,1fr) auto auto;
+  gap: 4px 14px;
+  align-items: center;
+  padding: 13px 4px;
+  border-bottom: 1px solid var(--line);
+}
+#files li:last-child { border-bottom: none; }
+.f-name { font-weight: 600; font-size: .95rem; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.f-note { grid-column: 1 / -1; color: var(--muted); font-size: .76rem; }
+.f-sizes { font-variant-numeric: tabular-nums; font-size: .92rem; white-space: nowrap; }
+.f-sizes .before { color: var(--muted); }
+.f-sizes .arrow { color: var(--muted); margin: 0 6px; }
+.f-sizes .after { color: var(--green); font-weight: 700; }
+.f-saved {
+  background: var(--green-tint); color: var(--green);
+  border-radius: 100px; padding: 3px 11px; font-size: .78rem; font-weight: 600; white-space: nowrap;
+}
+.f-status { color: var(--muted); font-size: .85rem; white-space: nowrap; }
+.f-error { color: var(--danger); font-size: .85rem; }
+.f-bar { grid-column: 1 / -1; height: 5px; background: var(--line); border-radius: 100px; overflow: hidden; }
+.f-bar i { display: block; height: 100%; width: 0; background: var(--green); border-radius: 100px; transition: width .35s; }
+.f-remove {
+  background: none; border: none; color: var(--muted); cursor: pointer;
+  font-size: 1.05rem; padding: 2px 8px; border-radius: 8px;
+}
+.f-remove:hover { color: var(--danger); background: var(--green-tint); }
+.f-dl {
+  color: var(--green); font-weight: 600; font-size: .86rem; text-decoration: none;
+  border: 1.5px solid var(--green); padding: 5px 14px; border-radius: 100px; white-space: nowrap;
+  transition: background .15s, color .15s;
+}
+.f-dl:hover { background: var(--green); color: #fff; }
+
+/* Output size selector */
+.size-row {
+  display: flex; align-items: center; gap: 20px; flex-wrap: wrap;
+  margin-top: 16px; padding-top: 16px; border-top: 1px solid var(--line);
+  font-size: .92rem;
+}
+.size-row .size-label { color: var(--muted); font-weight: 600; }
+.size-row label { display: inline-flex; align-items: center; gap: 7px; cursor: pointer; }
+.size-row input[type="radio"] { accent-color: var(--green); width: 16px; height: 16px; }
+.size-row input[type="number"] {
+  width: 86px; padding: 6px 10px; border: 1.5px solid var(--line); border-radius: 8px;
+  font-family: inherit; font-size: .92rem; color: var(--text); background: #fff;
+}
+.size-row input[type="number"]:focus { outline: none; border-color: var(--green); }
+
+/* Buttons — ink pill primary, green secondary (matching sustainablewww.se) */
+.btn {
+  display: inline-flex; align-items: center; justify-content: center; gap: 8px;
+  background: var(--ink); color: var(--cream); border: 1.5px solid var(--ink); cursor: pointer;
+  font-family: inherit; font-size: 1.02rem; font-weight: 500;
+  padding: 13px 32px; border-radius: 100px;
+  text-decoration: none;
+  transition: background .15s, color .15s, opacity .15s;
+}
+.btn:hover { background: #000; }
+.btn:disabled { opacity: .4; cursor: not-allowed; }
+.btn.secondary { background: transparent; color: var(--ink); }
+.btn.secondary:hover { background: var(--ink); color: var(--cream); }
+.btn.green { background: var(--green); border-color: var(--green); color: #fff; }
+.btn.green:hover { background: var(--green-hover); border-color: var(--green-hover); }
+.actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; margin-top: 18px; }
+
+/* Overall progress */
+#overall { display: none; margin-top: 16px; }
+#overall .o-label { display: flex; justify-content: space-between; font-size: .9rem; color: var(--muted); margin-bottom: 6px; }
+#overall .o-bar { height: 8px; background: var(--line); border-radius: 100px; overflow: hidden; }
+#overall .o-bar i { display: block; height: 100%; width: 0; background: var(--green); transition: width .4s; }
+
+/* Summary + CO2 */
+#summary { display: none; text-align: center; padding: 24px; }
+#summary .big { font-family: "Poppins", sans-serif; font-size: 1.4rem; font-weight: 600; color: var(--green); }
+#summary .sub { color: var(--muted); margin-top: 6px; font-size: .93rem; }
+#summary .co2 {
+  margin: 16px auto 0; max-width: 520px;
+  background: var(--green-tint); border-radius: 14px; padding: 14px 18px;
+  font-size: .92rem; color: var(--ink);
+}
+#summary .co2 b { color: var(--green); }
+#summary .co2 small { display: block; color: var(--muted); margin-top: 4px; font-size: .76rem; }
+
+/* Lead magnet CTA — always visible */
+#cta .cta-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+@media (max-width: 640px) { #cta .cta-grid { grid-template-columns: 1fr; } }
+.cta-card { border: 1px solid var(--line); border-radius: 14px; padding: 20px; background: #fff; }
+.cta-card h3 { font-size: 1.02rem; margin-bottom: 6px; }
+.cta-card p { font-size: .88rem; color: var(--muted); margin-bottom: 14px; }
+.cta-card .btn { font-size: .9rem; padding: 9px 22px; }
+
+/* FAQ */
+#faq h2 { font-size: 1.3rem; margin-bottom: 6px; }
+#faq details { border-bottom: 1px solid var(--line); padding: 13px 4px; }
+#faq details:last-of-type { border-bottom: none; }
+#faq summary { cursor: pointer; font-weight: 600; color: var(--ink); font-size: .97rem; }
+#faq summary::marker { color: var(--green); }
+#faq details p { margin-top: 8px; color: var(--muted); font-size: .92rem; }
+
+#toast {
+  position: fixed; left: 50%; bottom: 26px; transform: translateX(-50%);
+  background: var(--danger); color: #fff; padding: 11px 20px; border-radius: 10px;
+  font-size: .93rem; opacity: 0; pointer-events: none; transition: opacity .25s; max-width: 90vw; z-index: 10;
+}
+#toast.show { opacity: 1; }
+
+footer { text-align: center; padding: 28px 16px; color: var(--muted); font-size: .88rem; border-top: 1px solid var(--line); background: #fff; }
+footer a { color: var(--green); text-decoration: none; font-weight: 600; }
+footer a:hover { text-decoration: underline; }
+footer .small { font-size: .78rem; margin-top: 6px; }
+</style>
+</head>
+<body>
+<main>
+  <nav class="topbar">
+    <a class="brand" href="/" aria-label="SW3 Images home">
+      <!-- Same line-art mark as the Sustainable WWW logo -->
+      <svg viewBox="0 0 1105 1105" fill="none" aria-hidden="true">
+        <g stroke="#231f20" stroke-width="44" fill="none" stroke-miterlimit="10">
+          <path d="m1050.07,552.59c0,276.14-223.86,500-500,500S50.07,828.73,50.07,552.59c0-117.48,42.72-206.16,58.98-235.79C192.39,164.85,363.13,50.65,550.07,52.59c248.84,2.58,500,210.67,500,500Z"/>
+          <path d="m109.04,316.8c53.92,1.59,269.81,14.81,455.69,203.77,181.59,184.6,213.16,413.53,219.75,473.77"/>
+          <path d="m971.77,289.98c-22.45-2.19-149.03-12.02-251.58,96.82-69.89,74.17-91.34,163.9-98.12,199.5"/>
+          <path stroke-linecap="round" d="m174.31,419.48c50.9,12.42,122.17,35.78,198.47,81.98,69.22,41.91,119.45,88.6,153.17,125.12"/>
+          <path stroke-linecap="round" d="m738.07,798.13c38.8-48.38,80.87-109.25,117.39-182.24,32.94-65.83,53.87-126.53,67.44-178.36"/>
+          <path stroke-linecap="round" d="m769.73,970.75c-61-6.91-202.98-32.17-337.53-149.03-95.99-83.37-147.86-178.32-173.76-235.43"/>
+        </g>
+      </svg>
+      <span>SW3 <b>Images</b></span>
+    </a>
+    <a class="site" href="https://sustainablewww.se" target="_blank" rel="noopener">sustainablewww.se</a>
+  </nav>
+
+  <header class="hero">
+    <span class="badge">Free tool by Sustainable WWW</span>
+    <h1>Compress images.<br>Faster websites. Greener web.</h1>
+    <p>Drop in your JPG, PNG or WebP images and SW3 Images finds the smallest possible file with no visible quality loss — measured, not guessed. Compress, optimize and resize your images for the web before publishing them online.</p>
+    <p class="rust">The entire compression engine is written in <b>Rust</b> — the same craftsmanship we put into the websites we build.</p>
+  </header>
+
+  <section class="card" id="upload-card">
+    <div id="dropzone" role="button" tabindex="0" aria-label="Add images">
+      <div class="dz-icon">🖼️</div>
+      <p><strong>Drag &amp; drop</strong> your images here, or click to browse</p>
+      <p class="hint">JPG, PNG or WebP · up to 30 MB each</p>
+    </div>
+    <input type="file" id="picker" accept=".jpg,.jpeg,.png,.webp,image/jpeg,image/png,image/webp" multiple hidden>
+
+    <div class="limit-row">
+      <span id="count-label">0 / 10 files</span>
+      <button id="unlock-toggle">Need more than 10 files?</button>
+    </div>
+
+    <div id="unlock">
+      <div class="fields">
+        <input type="text" id="u-name" placeholder="Your name" autocomplete="name">
+        <input type="email" id="u-email" placeholder="you@example.com" autocomplete="email">
+      </div>
+      <p class="note">Leave your name and email to raise the limit from 10 to 50 files per batch. We'll occasionally share tips on faster, greener websites — no spam, ever.</p>
+    </div>
+    <p id="unlock-badge">✓ Thanks! You can now compress up to 50 files at a time.</p>
+    <!-- Honeypot: humans never see this field; bots autofill it. -->
+    <div class="hp" aria-hidden="true"><input type="text" id="hp-website" name="website" tabindex="-1" autocomplete="off"></div>
+  </section>
+
+  <section class="card" id="list-card" style="display:none">
+    <ul id="files"></ul>
+    <div class="size-row" id="size-row">
+      <span class="size-label">Output size:</span>
+      <label><input type="radio" name="sizing" id="size-orig" checked> Original size</label>
+      <label><input type="radio" name="sizing" id="size-max"> Resize to max width
+        <input type="number" id="max-width" value="1024" min="16" max="8192" inputmode="numeric"> px
+      </label>
+    </div>
+    <div class="actions">
+      <button class="btn" id="compress-btn">🌱 Compress</button>
+      <a class="btn green" id="zip-btn" style="display:none" href="#">⬇ Download all (.zip)</a>
+      <button class="btn secondary" id="reset-btn" style="display:none">Start over</button>
+    </div>
+    <div id="overall">
+      <div class="o-label"><span id="o-text">Uploading…</span><span id="o-pct">0%</span></div>
+      <div class="o-bar"><i id="o-fill"></i></div>
+    </div>
+  </section>
+
+  <section class="card" id="summary">
+    <div class="big" id="summary-big"></div>
+    <div class="sub" id="summary-sub"></div>
+    <div class="co2" id="summary-co2" style="display:none"></div>
+  </section>
+
+  <section class="card" id="cta">
+    <div class="cta-grid">
+      <div class="cta-card">
+        <h3>Want a website this light?</h3>
+        <p>We design and build fast, accessible, carbon-efficient websites — tailored to your business. SW3 Images is a small taste of how we work.</p>
+        <a class="btn green" href="https://sustainablewww.se" target="_blank" rel="noopener">Talk to Sustainable WWW</a>
+      </div>
+      <div class="cta-card">
+        <h3>Substack 📬</h3>
+        <p>About digital sustainability, behind the scenes, how it is to run a sustainable business, and much more.</p>
+        <a class="btn secondary" href="https://michaelandersentech.substack.com" target="_blank" rel="noopener">Subscribe</a>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="faq">
+    <h2>Frequently asked questions</h2>
+    <details>
+      <summary>How do I optimize images for the web?</summary>
+      <p>Drag and drop up to 10 JPG, PNG or WebP images into SW3 Images (50 with the free unlock), click Compress, and download the results one by one or as a zip. SW3 Images searches for the smallest file that still looks identical to your original — typically 40–90% smaller.</p>
+    </details>
+    <details>
+      <summary>Does compressing images reduce their quality?</summary>
+      <p>Not visibly. Every candidate file is measured against your original with DSSIM, a perceptual metric that models human vision, and judged at the size the image is actually viewed on a web page. If quality cannot be preserved, SW3 Images returns your original file instead — it never makes files bigger.</p>
+    </details>
+    <details>
+      <summary>Can I resize images as well?</summary>
+      <p>Yes. Choose "Resize to max width" and set a pixel width, for example 1024. Every image wider than that is scaled down with its aspect ratio preserved before compression; images are never upscaled.</p>
+    </details>
+    <details>
+      <summary>Which image formats are supported?</summary>
+      <p>JPEG, PNG and WebP, up to 30 MB per image. The format never changes — a PNG in is a PNG out. JPEGs are re-encoded with mozjpeg, PNGs with imagequant and oxipng, WebP with libwebp at maximum effort.</p>
+    </details>
+    <details>
+      <summary>Is it free, and what happens to my images?</summary>
+      <p>SW3 Images is free and requires no account. Uploads are private, reachable only through an unguessable link, and deleted automatically after 24 hours. Metadata such as EXIF and GPS location is stripped, which shrinks files and protects your privacy.</p>
+    </details>
+    <details>
+      <summary>What makes the compression algorithm special?</summary>
+      <p>Most tools apply a fixed quality setting. SW3 Images instead runs a perceptually-guided search, written in Rust: it measures structural similarity in Lab color space for every candidate and picks the smallest file below a visually-lossless threshold — quality is measured, not guessed.</p>
+    </details>
+  </section>
+</main>
+
+<div id="toast" role="alert"></div>
+
+<footer>
+  <div>Made by <a href="https://sustainablewww.se" target="_blank" rel="noopener">Sustainable WWW Sweden AB</a> and <a href="https://michaelandersen.net" target="_blank" rel="noopener">Michael Andersen</a> · Compression engine written in Rust 🦀</div>
+  <div class="small">Compressed files are stored for 24 hours, then deleted automatically. 🌍 By using this free tool you agree not to upload unlawful content.</div>
+  <div class="small">SW3 Images · launched July 2026</div>
+</footer>
+
+<script>
+"use strict";
+const FREE_MAX = 10, UNLOCKED_MAX = 50, MAX_BYTES = 30 * 1024 * 1024;
+const OK_TYPES = ["image/jpeg", "image/png", "image/webp"];
+const OK_EXT = /\.(jpe?g|png|webp)$/i;
+// Sustainable Web Design model: ~0.35 g CO2e per MB transferred, per view.
+const CO2_G_PER_MB_VIEW = 0.35, VIEWS_PER_MONTH = 10000;
+
+const $ = id => document.getElementById(id);
+const dropzone = $("dropzone"), picker = $("picker"), filesUl = $("files");
+const listCard = $("list-card"), compressBtn = $("compress-btn"), zipBtn = $("zip-btn"), resetBtn = $("reset-btn");
+const countLabel = $("count-label"), unlockBox = $("unlock"), unlockBadge = $("unlock-badge");
+const overall = $("overall"), oText = $("o-text"), oPct = $("o-pct"), oFill = $("o-fill");
+
+let pending = [];      // File objects before upload
+let jobId = null;
+let phase = "pick";    // pick | uploading | working | done
+
+// ---------- helpers ----------
+function fmtSize(bytes) {
+  if (bytes >= 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + " MB";
+  return Math.max(0.1, bytes / 1024).toFixed(1) + " KB";
+}
+let toastTimer;
+function toast(msg) {
+  const t = $("toast");
+  t.textContent = msg;
+  t.classList.add("show");
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove("show"), 4200);
+}
+function unlocked() {
+  return $("u-name").value.trim().length > 0 && /.+@.+\..+/.test($("u-email").value.trim());
+}
+function maxFiles() { return unlocked() ? UNLOCKED_MAX : FREE_MAX; }
+
+// ---------- picking files ----------
+function addFiles(fileList) {
+  if (phase !== "pick") return;
+  for (const f of fileList) {
+    const okType = OK_TYPES.includes(f.type) || OK_EXT.test(f.name);
+    if (!okType) { toast(`"${f.name}" is not a JPG, PNG or WebP image`); continue; }
+    if (f.size > MAX_BYTES) { toast(`"${f.name}" is over the 30 MB limit`); continue; }
+    if (pending.some(p => p.name === f.name && p.size === f.size)) continue;
+    if (pending.length >= maxFiles()) {
+      toast(unlocked()
+        ? `Maximum ${UNLOCKED_MAX} files at a time`
+        : `Maximum ${FREE_MAX} files — add your name & email below to unlock 50`);
+      break;
+    }
+    pending.push(f);
+  }
+  renderPending();
+}
+
+function renderPending() {
+  countLabel.textContent = `${pending.length} / ${maxFiles()} files`;
+  unlockBadge.style.display = unlocked() ? "block" : "none";
+  listCard.style.display = pending.length ? "block" : "none";
+  if (phase !== "pick") return;
+  filesUl.innerHTML = "";
+  pending.forEach((f, i) => {
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <span class="f-name"></span>
+      <span class="f-sizes"><span class="before"></span></span>
+      <button class="f-remove" title="Remove" aria-label="Remove">✕</button>`;
+    li.querySelector(".f-name").textContent = f.name;
+    li.querySelector(".before").textContent = fmtSize(f.size);
+    li.querySelector(".f-remove").onclick = () => { pending.splice(i, 1); renderPending(); };
+    filesUl.appendChild(li);
+  });
+  compressBtn.disabled = pending.length === 0;
+}
+
+dropzone.addEventListener("click", () => picker.click());
+dropzone.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") picker.click(); });
+picker.addEventListener("change", () => { addFiles(picker.files); picker.value = ""; });
+["dragenter", "dragover"].forEach(ev => dropzone.addEventListener(ev, e => {
+  e.preventDefault(); dropzone.classList.add("drag");
+}));
+["dragleave", "drop"].forEach(ev => dropzone.addEventListener(ev, e => {
+  e.preventDefault(); dropzone.classList.remove("drag");
+}));
+dropzone.addEventListener("drop", e => addFiles(e.dataTransfer.files));
+// Dropping anywhere on the page shouldn't navigate away from the app
+window.addEventListener("dragover", e => e.preventDefault());
+window.addEventListener("drop", e => e.preventDefault());
+
+$("unlock-toggle").addEventListener("click", () => unlockBox.classList.toggle("open"));
+["u-name", "u-email"].forEach(id => $(id).addEventListener("input", renderPending));
+
+// Typing a width implies choosing the resize option.
+$("max-width").addEventListener("focus", () => { $("size-max").checked = true; });
+$("max-width").addEventListener("input", () => { $("size-max").checked = true; });
+
+// ---------- compressing ----------
+compressBtn.addEventListener("click", () => {
+  if (!pending.length || phase !== "pick") return;
+  if (pending.length > maxFiles()) { toast(`Too many files (max ${maxFiles()})`); return; }
+  let maxWidth = null;
+  if ($("size-max").checked) {
+    maxWidth = parseInt($("max-width").value, 10);
+    if (!Number.isInteger(maxWidth) || maxWidth < 16 || maxWidth > 8192) {
+      toast("Max width must be between 16 and 8192 px");
+      return;
+    }
+  }
+  phase = "uploading";
+  $("size-row").style.display = "none";
+  compressBtn.disabled = true;
+  compressBtn.textContent = "Uploading…";
+  overall.style.display = "block";
+  setOverall("Uploading…", 0);
+
+  const fd = new FormData();
+  fd.append("website", $("hp-website").value); // honeypot — empty for humans
+  if (maxWidth) fd.append("max_width", maxWidth);
+  if (unlocked()) {
+    fd.append("name", $("u-name").value.trim());
+    fd.append("email", $("u-email").value.trim());
+  }
+  pending.forEach(f => fd.append("file", f, f.name));
+
+  const xhr = new XMLHttpRequest();
+  xhr.open("POST", "/api/jobs");
+  xhr.upload.onprogress = e => {
+    if (e.lengthComputable) setOverall("Uploading…", (e.loaded / e.total) * 100 * 0.999);
+  };
+  xhr.onload = () => {
+    let body = {};
+    try { body = JSON.parse(xhr.responseText); } catch {}
+    if (xhr.status >= 200 && xhr.status < 300 && body.job_id) {
+      jobId = body.job_id;
+      phase = "working";
+      compressBtn.textContent = "Compressing…";
+      renderJob(body);
+      poll();
+    } else {
+      failUpload(body.error || `Upload failed (HTTP ${xhr.status})`);
+    }
+  };
+  xhr.onerror = () => failUpload("Upload failed — is the server running?");
+  xhr.send(fd);
+});
+
+function failUpload(msg) {
+  toast(msg);
+  phase = "pick";
+  compressBtn.disabled = false;
+  compressBtn.textContent = "🌱 Compress";
+  overall.style.display = "none";
+  renderPending();
+}
+
+function setOverall(text, pct) {
+  oText.textContent = text;
+  oPct.textContent = Math.round(pct) + "%";
+  oFill.style.width = pct + "%";
+}
+
+async function poll() {
+  if (!jobId) return;
+  try {
+    const res = await fetch(`/api/jobs/${jobId}`);
+    if (!res.ok) throw new Error("job lost");
+    const job = await res.json();
+    renderJob(job);
+    if (job.done) { finish(job); return; }
+  } catch (e) { /* transient — keep polling */ }
+  setTimeout(poll, 650);
+}
+
+function renderJob(job) {
+  filesUl.innerHTML = "";
+  let doneCount = 0, progressSum = 0;
+  for (const f of job.files) {
+    progressSum += f.status === "done" || f.status === "error" ? 100 : f.progress;
+    if (f.status === "done" || f.status === "error") doneCount++;
+    const li = document.createElement("li");
+
+    const name = document.createElement("span");
+    name.className = "f-name";
+    name.textContent = f.name;
+    li.appendChild(name);
+
+    const sizes = document.createElement("span");
+    sizes.className = "f-sizes";
+    if (f.status === "done") {
+      const savedPct = f.orig_size > 0 ? Math.max(0, (1 - f.out_size / f.orig_size) * 100) : 0;
+      sizes.innerHTML = `<span class="before"></span><span class="arrow">→</span><span class="after"></span>`;
+      sizes.querySelector(".before").textContent = fmtSize(f.orig_size);
+      sizes.querySelector(".after").textContent = fmtSize(f.out_size);
+      li.appendChild(sizes);
+
+      const right = document.createElement("span");
+      right.style.display = "inline-flex";
+      right.style.gap = "10px";
+      right.style.alignItems = "center";
+      const badge = document.createElement("span");
+      badge.className = "f-saved";
+      badge.textContent = savedPct < 0.5 ? "already optimal" : "−" + savedPct.toFixed(0) + "%";
+      right.appendChild(badge);
+      const dl = document.createElement("a");
+      dl.className = "f-dl";
+      dl.href = `/api/jobs/${jobId}/files/${f.index}`;
+      dl.textContent = "Download";
+      right.appendChild(dl);
+      li.appendChild(right);
+
+      if (f.note) {
+        const note = document.createElement("span");
+        note.className = "f-note";
+        note.textContent = f.note;
+        li.appendChild(note);
+      }
+    } else if (f.status === "error") {
+      sizes.innerHTML = `<span class="before"></span>`;
+      sizes.querySelector(".before").textContent = fmtSize(f.orig_size);
+      li.appendChild(sizes);
+      const err = document.createElement("span");
+      err.className = "f-error";
+      err.textContent = "✕ " + (f.error || "failed");
+      li.appendChild(err);
+    } else {
+      sizes.innerHTML = `<span class="before"></span><span class="arrow">→</span><span class="after">…</span>`;
+      sizes.querySelector(".before").textContent = fmtSize(f.orig_size);
+      li.appendChild(sizes);
+      const st = document.createElement("span");
+      st.className = "f-status";
+      st.textContent = f.status === "working" ? `analyzing ${Math.round(f.progress)}%` : "queued";
+      li.appendChild(st);
+      const bar = document.createElement("span");
+      bar.className = "f-bar";
+      bar.innerHTML = "<i></i>";
+      bar.querySelector("i").style.width = f.progress + "%";
+      li.appendChild(bar);
+    }
+    filesUl.appendChild(li);
+  }
+  if (phase === "working") {
+    const pct = progressSum / job.files.length;
+    setOverall(`Compressing… ${doneCount} of ${job.files.length} files done`, pct);
+  }
+}
+
+function finish(job) {
+  phase = "done";
+  compressBtn.style.display = "none";
+  overall.style.display = "none";
+  resetBtn.style.display = "inline-flex";
+  const ok = job.files.filter(f => f.status === "done");
+  if (ok.length > 0) {
+    zipBtn.style.display = "inline-flex";
+    zipBtn.href = `/api/jobs/${jobId}/zip`;
+  }
+  const before = ok.reduce((s, f) => s + f.orig_size, 0);
+  const after = ok.reduce((s, f) => s + f.out_size, 0);
+  const saved = before - after;
+  const summary = $("summary");
+  summary.style.display = "block";
+  if (ok.length && saved > 0) {
+    $("summary-big").textContent = `🎉 You saved ${fmtSize(saved)} (${((saved / before) * 100).toFixed(1)}%)`;
+    $("summary-sub").textContent =
+      `${ok.length} image${ok.length > 1 ? "s" : ""}: ${fmtSize(before)} → ${fmtSize(after)}. ` +
+      `Smaller images mean faster pages and happier visitors.`;
+    const savedMB = saved / (1024 * 1024);
+    const kgPerYear = savedMB * CO2_G_PER_MB_VIEW * VIEWS_PER_MONTH * 12 / 1000;
+    if (kgPerYear >= 0.1) {
+      const co2 = $("summary-co2");
+      co2.style.display = "block";
+      co2.innerHTML = `🌍 On a page with ${VIEWS_PER_MONTH.toLocaleString()} views a month, this saves roughly <b>${kgPerYear >= 10 ? kgPerYear.toFixed(0) : kgPerYear.toFixed(1)} kg of CO₂e per year</b> in data transfer.<small>Estimate based on the Sustainable Web Design model (~0.35 g CO₂e per MB per view).</small>`;
+    }
+  } else if (ok.length) {
+    $("summary-big").textContent = "Your images were already perfectly optimized ✨";
+    $("summary-sub").textContent = "SW3 Images never inflates files — you got the originals back.";
+  } else {
+    $("summary-big").textContent = "No images could be compressed";
+    $("summary-sub").textContent = "Please check the errors above and try again.";
+  }
+}
+
+resetBtn.addEventListener("click", () => {
+  pending = []; jobId = null; phase = "pick";
+  filesUl.innerHTML = "";
+  listCard.style.display = "none";
+  $("summary").style.display = "none";
+  $("summary-co2").style.display = "none";
+  zipBtn.style.display = "none";
+  resetBtn.style.display = "none";
+  compressBtn.style.display = "inline-flex";
+  compressBtn.disabled = false;
+  compressBtn.textContent = "🌱 Compress";
+  $("size-row").style.display = "flex";
+  renderPending();
+});
+
+renderPending();
+</script>
+</body>
+</html>
