@@ -65,7 +65,6 @@ pub fn new_state(data_dir: PathBuf) -> Arc<AppState> {
 pub fn app(state: Arc<AppState>) -> Router {
     Router::new()
         .route("/", get(index))
-        .route("/healthz", get(healthz))
         .route("/robots.txt", get(robots_txt))
         .route("/llms.txt", get(llms_txt))
         .route("/api/jobs", post(create_job))
@@ -79,59 +78,17 @@ pub fn app(state: Arc<AppState>) -> Router {
 pub async fn run() {
     // Load .env from the project root (silently skipped if absent).
     dotenvy::dotenv().ok();
-
-    // Resolve the data directory to an absolute path immediately, so that
-    // nothing later can be surprised by a changed working directory (PM2 in
-    // particular can set cwd differently than the shell you launched it from).
-    let raw_data_dir = std::env::var("SW3_DATA").unwrap_or_else(|_| "data".to_string());
-    let cwd_display = std::env::current_dir()
-        .map(|p| p.display().to_string())
-        .unwrap_or_else(|_| "?".into());
-    let data_dir = std::path::PathBuf::from(&raw_data_dir);
-    let data_dir = if data_dir.is_absolute() {
-        data_dir
-    } else {
-        std::env::current_dir()
-            .unwrap_or_else(|_| std::path::PathBuf::from("."))
-            .join(&data_dir)
-    };
-    println!("cwd: {cwd_display}");
-    println!("data directory: {} (SW3_DATA={raw_data_dir})", data_dir.display());
-
-    // Startup self-test: create the directory and prove it's writable before
-    // accepting any traffic. Fail fast with a specific, actionable message
-    // instead of surfacing an opaque "os error 2" on the first upload.
-    if let Err(e) = std::fs::create_dir_all(&data_dir) {
-        eprintln!(
-            "FATAL: could not create data directory {}: {e}\n\
-             Check that the user running the process has write permission,\n\
-             or set SW3_DATA to a path they own (e.g. SW3_DATA=/home/pi/sw3-images-data).",
-            data_dir.display()
-        );
-        std::process::exit(1);
-    }
-    let probe = data_dir.join(".write-probe");
-    if let Err(e) = std::fs::write(&probe, b"ok").and_then(|_| std::fs::remove_file(&probe)) {
-        eprintln!(
-            "FATAL: data directory {} is not writable: {e}",
-            data_dir.display()
-        );
-        std::process::exit(1);
-    }
-
+    let data_dir = std::env::var("SW3_DATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| PathBuf::from("data"));
     let state = new_state(data_dir);
 
-    // 24-hour retention: sweep every 15 minutes. cleanup_expired does
-    // filesystem work, so it belongs on the blocking pool — not on the
-    // async runtime thread where it would stall other tasks.
+    // 24-hour retention: sweep every 15 minutes.
     {
         let state = state.clone();
         tokio::spawn(async move {
             loop {
-                let s = state.clone();
-                let removed = tokio::task::spawn_blocking(move || s.registry.cleanup_expired())
-                    .await
-                    .unwrap_or(0);
+                let removed = state.registry.cleanup_expired();
                 if removed > 0 {
                     println!("cleanup: removed {removed} expired job(s)");
                 }
@@ -143,42 +100,17 @@ pub async fn run() {
     let port: u16 = std::env::var("PORT").ok().and_then(|p| p.parse().ok()).unwrap_or(2500);
     let addr = SocketAddr::from(([0, 0, 0, 0], port));
     println!("🌱 SW3 Images listening on http://localhost:{port}");
-    let listener = match tokio::net::TcpListener::bind(addr).await {
-        Ok(l) => l,
-        Err(e) => {
-            eprintln!("FATAL: could not bind port {port}: {e}");
-            std::process::exit(1);
-        }
-    };
-    if let Err(e) = axum::serve(
+    let listener = tokio::net::TcpListener::bind(addr).await.expect("could not bind port");
+    axum::serve(
         listener,
         app(state).into_make_service_with_connect_info::<SocketAddr>(),
     )
     .await
-    {
-        eprintln!("FATAL: http server error: {e}");
-        std::process::exit(1);
-    }
+    .unwrap();
 }
 
 async fn index() -> Html<&'static str> {
     Html(include_str!("../static/index.html"))
-}
-
-/// Quick config + writability check. Curl this on the Pi to confirm the
-/// server is up AND that its data directory is where you expect and usable:
-///   curl -s http://localhost:2500/healthz | jq
-async fn healthz(State(state): State<Arc<AppState>>) -> Json<serde_json::Value> {
-    let probe = state.data_dir.join(".healthz-probe");
-    let writable = std::fs::write(&probe, b"ok")
-        .and_then(|_| std::fs::remove_file(&probe))
-        .is_ok();
-    Json(serde_json::json!({
-        "status": "ok",
-        "data_dir": state.data_dir.display().to_string(),
-        "data_dir_writable": writable,
-        "version": env!("CARGO_PKG_VERSION"),
-    }))
 }
 
 /// Welcome all crawlers — visibility in search and AI engines is the goal.
@@ -280,11 +212,9 @@ async fn create_job(
     let id = Uuid::new_v4();
     let dir = state.registry.jobs_dir.join(id.to_string());
     let orig_dir = dir.join("orig");
-    tokio::fs::create_dir_all(&orig_dir).await.map_err(|e| {
-        let msg = format!("could not create upload directory {}: {e}", orig_dir.display());
-        eprintln!("{msg}");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg)
-    })?;
+    tokio::fs::create_dir_all(&orig_dir)
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     // On any validation error, remove the partly-written job dir.
     let result = read_upload(&mut multipart, &orig_dir).await;
@@ -313,14 +243,9 @@ async fn create_job(
             })
             .collect(),
     };
-    let meta_path = dir.join("meta.json");
-    tokio::fs::write(&meta_path, serde_json::to_vec(&meta).unwrap())
+    tokio::fs::write(dir.join("meta.json"), serde_json::to_vec(&meta).unwrap())
         .await
-        .map_err(|e| {
-            let msg = format!("could not write {}: {e}", meta_path.display());
-            eprintln!("{msg}");
-            ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg)
-        })?;
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     let job = Arc::new(Job {
         id,
@@ -330,12 +255,9 @@ async fn create_job(
     });
     state.registry.insert(job.clone());
 
-    let out_dir = dir.join("out");
-    tokio::fs::create_dir_all(&out_dir).await.map_err(|e| {
-        let msg = format!("could not create output directory {}: {e}", out_dir.display());
-        eprintln!("{msg}");
-        ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg)
-    })?;
+    tokio::fs::create_dir_all(dir.join("out"))
+        .await
+        .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
 
     for idx in 0..job.files.len() {
         spawn_compression(state.clone(), job.clone(), idx, max_width);
@@ -384,11 +306,9 @@ async fn read_upload(
 
                 // Stream to disk; sniff the real format from the first chunk.
                 let tmp_path = orig_dir.join(format!("{}.tmp", files.len()));
-                let mut file = tokio::fs::File::create(&tmp_path).await.map_err(|e| {
-                    let msg = format!("could not create upload temp file {}: {e}", tmp_path.display());
-                    eprintln!("{msg}");
-                    ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg)
-                })?;
+                let mut file = tokio::fs::File::create(&tmp_path)
+                    .await
+                    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 let mut head: Vec<u8> = Vec::with_capacity(16);
                 let mut written: u64 = 0;
                 while let Some(chunk) = field
@@ -417,15 +337,9 @@ async fn read_upload(
                 }
 
                 let final_path = orig_dir.join(format!("{}.{}", files.len(), format.extension()));
-                tokio::fs::rename(&tmp_path, &final_path).await.map_err(|e| {
-                    let msg = format!(
-                        "could not rename upload {} -> {}: {e}",
-                        tmp_path.display(),
-                        final_path.display()
-                    );
-                    eprintln!("{msg}");
-                    ApiError(StatusCode::INTERNAL_SERVER_ERROR, msg)
-                })?;
+                tokio::fs::rename(&tmp_path, &final_path)
+                    .await
+                    .map_err(|e| ApiError(StatusCode::INTERNAL_SERVER_ERROR, e.to_string()))?;
                 files.push(Arc::new(FileEntry::new(filename, format, written)));
             }
             _ => {}
@@ -459,68 +373,22 @@ fn spawn_compression(state: Arc<AppState>, job: Arc<Job>, idx: usize, max_width:
         let format = entry.format;
         let entry_for_progress = entry.clone();
 
-        // Build the tmp path by string append rather than Path::with_extension:
-        // with_extension("jpg.tmp") on a filename like "0.jpg" would replace
-        // "jpg" with "jpg.tmp" -> "0.jpg.tmp", which happens to be what we
-        // want, but the behavior is subtle enough to bite you. Do it plainly.
-        let mut out_path_tmp = out_path.clone().into_os_string();
-        out_path_tmp.push(".tmp");
-        let out_path_tmp = std::path::PathBuf::from(out_path_tmp);
-        let out_path_tmp_for_cleanup = out_path_tmp.clone();
-
-        // Hard per-file ceiling. If a codec ever hangs (infinite loop deep in
-        // a C library, pathological input), the whole queue would otherwise
-        // stop forever. 5 minutes is very generous for a single image on a
-        // Pi — well above the p99, well below "the site is down". Note that
-        // if the timeout fires, the blocking task is not cancelled (spawn_-
-        // blocking tasks can't be); it runs to completion and its result is
-        // discarded. That's fine: the semaphore is released, the queue moves
-        // on, and only that one thread stays busy until the codec returns.
-        let orig_path_for_err = orig_path.clone();
-        let out_path_for_err = out_path.clone();
-        let out_path_tmp_for_err = out_path_tmp.clone();
-        let compression = tokio::task::spawn_blocking(move || {
-            let input = std::fs::read(&orig_path).map_err(|e| {
-                anyhow::anyhow!("read {}: {e}", orig_path_for_err.display())
-            })?;
+        let result = tokio::task::spawn_blocking(move || {
+            let input = std::fs::read(&orig_path)?;
             let progress = move |f: f32| entry_for_progress.set_progress(f);
             let out = compress::compress(&input, format, max_width, &progress)?;
-            // Write to a .tmp and rename, so a mid-write SIGTERM/OOM can never
-            // leave a truncated output that load_from_disk would report as
-            // "done" with the wrong bytes on the next start.
-            std::fs::write(&out_path_tmp, &out.data).map_err(|e| {
-                anyhow::anyhow!("write {}: {e}", out_path_tmp_for_err.display())
-            })?;
-            std::fs::rename(&out_path_tmp, &out_path).map_err(|e| {
-                anyhow::anyhow!(
-                    "rename {} -> {}: {e}",
-                    out_path_tmp_for_err.display(),
-                    out_path_for_err.display()
-                )
-            })?;
+            std::fs::write(&out_path, &out.data)?;
             Ok::<_, anyhow::Error>((out.data.len() as u64, out.note))
-        });
-        let result = tokio::time::timeout(std::time::Duration::from_secs(300), compression).await;
+        })
+        .await;
 
         match result {
-            Ok(Ok(Ok((size, note)))) => entry.finish(size, note),
-            Ok(Ok(Err(e))) => {
-                eprintln!("compression failed: job={} idx={} name={} err={e:#}", job.id, idx, entry.name);
-                entry.fail(e.to_string());
-            }
-            Ok(Err(join_err)) => {
-                eprintln!("compression thread crashed: job={} idx={} name={} err={join_err}", job.id, idx, entry.name);
-                entry.fail("Compression crashed — please try again.".into());
-            }
-            Err(_) => {
-                eprintln!("compression timeout: job={} idx={} name={}", job.id, idx, entry.name);
-                entry.fail("Compression took too long and was cancelled — please try again with a smaller image.".into());
-            }
+            Ok(Ok((size, note))) => entry.finish(size, note),
+            Ok(Err(e)) => entry.fail(e.to_string()),
+            Err(_) => entry.fail("compression crashed".into()),
         }
-        // Originals are only needed as compressor input — drop them right
-        // away. Also mop up any leftover .tmp from a failed rename.
+        // Originals are only needed as compressor input — drop them right away.
         let _ = tokio::fs::remove_file(job.orig_path(idx)).await;
-        let _ = tokio::fs::remove_file(&out_path_tmp_for_cleanup).await;
         drop(permit);
     });
 }
