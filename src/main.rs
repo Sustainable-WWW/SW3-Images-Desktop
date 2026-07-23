@@ -11,12 +11,13 @@ fn main() {
     }));
 
     // Bound the blocking-thread pool. tokio's default is 512, which on a Pi
-    // means an OOM if something ever spawns pool tasks in a loop. With
-    // SW3_CONCURRENCY=1 we need very few — a handful of headroom for zip
-    // building and other transient blocking work.
+    // means an OOM if something ever spawns pool tasks in a loop. 32 is a
+    // safe ceiling: tokio::fs also uses this pool (create_dir_all, rename,
+    // metadata all take a slot), so it has to be comfortably above the
+    // number of concurrent requests times a few filesystem ops each.
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
-        .max_blocking_threads(8)
+        .max_blocking_threads(32)
         .build()
         .expect("could not start tokio runtime");
     runtime.block_on(sw3_images::server::run());
