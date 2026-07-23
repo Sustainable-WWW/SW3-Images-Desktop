@@ -83,6 +83,35 @@ pub fn compress(
     max_width: Option<u32>,
     progress: Progress,
 ) -> Result<Compressed> {
+    // Belt-and-braces: catch panics from any codec (imagequant / oxipng /
+    // libwebp / dssim / image) so an ill-formed image can never take down
+    // the process. tokio::spawn_blocking would also catch a panic here as a
+    // JoinError, but doing it locally means we still get the underlying
+    // panic message in the failure text, which is invaluable for triage.
+    match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        compress_inner(input, format, max_width, progress)
+    })) {
+        Ok(res) => res,
+        Err(payload) => {
+            let msg = if let Some(s) = payload.downcast_ref::<&str>() {
+                (*s).to_string()
+            } else if let Some(s) = payload.downcast_ref::<String>() {
+                s.clone()
+            } else {
+                "unknown panic".to_string()
+            };
+            eprintln!("compress panic: format={format:?} msg={msg}");
+            Err(anyhow!("Could not process this image ({msg})"))
+        }
+    }
+}
+
+fn compress_inner(
+    input: &[u8],
+    format: Format,
+    max_width: Option<u32>,
+    progress: Progress,
+) -> Result<Compressed> {
     progress(0.02);
     let mut img = decode(input, format)?;
 

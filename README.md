@@ -48,6 +48,7 @@ All supported variables:
 | `PORT` | `2500` | HTTP port |
 | `SW3_DATA` | `./data` | Storage directory (jobs + leads) |
 | `TRUST_PROXY` | off | Set `1` behind nginx so rate limiting uses the real client IP from `X-Forwarded-For` |
+| `SW3_CONCURRENCY` | `1` | How many images to compress at once. Default `1` keeps peak RAM predictable on a Raspberry Pi; raise only if you have plenty of memory and want more throughput. |
 
 ## How the compression works
 

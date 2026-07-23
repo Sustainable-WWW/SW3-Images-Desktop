@@ -189,7 +189,14 @@ impl Registry {
                 let out = dir.join("out").join(format!("{i}.{}", fm.ext));
                 match std::fs::metadata(&out) {
                     Ok(m) => entry.finish(m.len(), "Compressed".into()),
-                    Err(_) => entry.fail("Interrupted by server restart — please re-upload".into()),
+                    // Fires when this file was queued/mid-compression at the
+                    // moment the process exited (crash, OOM kill, deploy) and
+                    // therefore never produced an output on disk. On a healthy
+                    // server this should be rare — see the concurrency = 1
+                    // safeguard in server.rs::new_state.
+                    Err(_) => entry.fail(
+                        "Compression didn't finish before the server restarted — please try again.".into(),
+                    ),
                 }
                 Arc::new(entry)
             })

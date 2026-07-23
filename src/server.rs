@@ -40,10 +40,20 @@ pub struct AppState {
 
 pub fn new_state(data_dir: PathBuf) -> Arc<AppState> {
     let registry = Registry::new(&data_dir).expect("could not create data directory");
-    let workers = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
+    // Compress one image at a time. Peak memory during a large photo's
+    // quality search can hit a few hundred MB; running two in parallel used
+    // to blow past the PM2 memory ceiling on the Pi, killing the process
+    // mid-compression and marking everything "Interrupted". Sequential is
+    // reliable and, since mozjpeg/libwebp/oxipng/DSSIM already use SIMD
+    // internally, only marginally slower on wall-clock time.
+    let concurrency = std::env::var("SW3_CONCURRENCY")
+        .ok()
+        .and_then(|v| v.parse::<usize>().ok())
+        .filter(|n| *n >= 1)
+        .unwrap_or(1);
     Arc::new(AppState {
         registry,
-        sem: Arc::new(Semaphore::new(workers.saturating_sub(1).clamp(2, 4))),
+        sem: Arc::new(Semaphore::new(concurrency)),
         data_dir,
         leads: Mutex::new(()),
         limiter: Mutex::new(HashMap::new()),
@@ -363,22 +373,37 @@ fn spawn_compression(state: Arc<AppState>, job: Arc<Job>, idx: usize, max_width:
         let format = entry.format;
         let entry_for_progress = entry.clone();
 
-        let result = tokio::task::spawn_blocking(move || {
+        // Hard per-file ceiling. If a codec ever hangs (infinite loop deep in
+        // a C library, pathological input), the whole queue would otherwise
+        // stop forever. 5 minutes is very generous for a single image on a
+        // Pi — well above the p99, well below "the site is down".
+        let out_path_tmp = out_path.with_extension(format!("{}.tmp", format.extension()));
+        let compression = tokio::task::spawn_blocking(move || {
             let input = std::fs::read(&orig_path)?;
             let progress = move |f: f32| entry_for_progress.set_progress(f);
             let out = compress::compress(&input, format, max_width, &progress)?;
-            std::fs::write(&out_path, &out.data)?;
+            // Write to a .tmp and rename, so a mid-write SIGTERM/OOM can never
+            // leave a truncated output that load_from_disk would report as
+            // "done" with the wrong bytes on the next start.
+            std::fs::write(&out_path_tmp, &out.data)?;
+            std::fs::rename(&out_path_tmp, &out_path)?;
             Ok::<_, anyhow::Error>((out.data.len() as u64, out.note))
-        })
-        .await;
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(300), compression).await;
 
         match result {
-            Ok(Ok((size, note))) => entry.finish(size, note),
-            Ok(Err(e)) => entry.fail(e.to_string()),
-            Err(_) => entry.fail("compression crashed".into()),
+            Ok(Ok(Ok((size, note)))) => entry.finish(size, note),
+            Ok(Ok(Err(e))) => entry.fail(e.to_string()),
+            Ok(Err(_)) => entry.fail("Compression crashed — please try again.".into()),
+            Err(_) => {
+                eprintln!("compression timeout: job={} idx={} name={}", job.id, idx, entry.name);
+                entry.fail("Compression took too long and was cancelled — please try again with a smaller image.".into());
+            }
         }
-        // Originals are only needed as compressor input — drop them right away.
+        // Originals are only needed as compressor input — drop them right
+        // away. Also mop up any leftover .tmp from a failed rename.
         let _ = tokio::fs::remove_file(job.orig_path(idx)).await;
+        let _ = tokio::fs::remove_file(job.out_path(idx).with_extension(format!("{}.tmp", entry.format.extension()))).await;
         drop(permit);
     });
 }
