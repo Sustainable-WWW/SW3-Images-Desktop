@@ -1,0 +1,10 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "The UI may only call the app's own commands, listen to events and drag the window. File system, shell, dialogs, updates and notifications are handled in Rust, never exposed to the webview.",
+  "windows": ["main", "about"],
+  "permissions": [
+    "core:default",
+    "core:window:allow-start-dragging"
+  ]
+}

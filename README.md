@@ -1,243 +1,183 @@
-# 🌱 SW3 Images
+# 🌱 SW3 Images — desktop app
 
-Smart, visually-lossless image compression for the web, written in Rust.
-Upload JPG, PNG or WebP images and get back dramatically smaller files with
-no visible quality loss — ready for publishing on the internet.
+Smart, visually lossless image compression for macOS (Apple Silicon) and
+Windows, built with [Tauri 2](https://tauri.app) and Rust. Drop in JPG, PNG or
+WebP images (or whole folders) and get dramatically smaller files with no
+visible quality loss. You can also resize them and convert them to WebP.
 
 Made by [Sustainable WWW Sweden AB](https://sustainablewww.se) and
 [Michael Andersen](https://michaelandersen.net).
 
-## Running locally
+## Features
+
+- **No file limit.** Drop as many images or folders as you like. Folders are
+  searched recursively, and hidden files and non-images are skipped.
+- **Parallel compression.** Up to 5 images at a time (one CPU core is kept
+  free so the UI stays smooth; machines with fewer cores use fewer workers).
+- **Resize** to a max width (aspect ratio kept, never upscaled).
+- **Convert to WebP** together with resizing and compression. Transparency
+  is kept.
+- **Automatic output folder.** Results go to `Pictures/SW3 Compressed`
+  (created on first launch; change it with *Change* in the app). Originals are
+  never touched, and existing files are never overwritten: name clashes
+  become `photo (2).jpg`.
+- **Native notification** when a batch finishes, plus progress in the Dock
+  or taskbar icon.
+- **Automatic updates** from GitHub Releases, verified with a signature.
+- **About window** from the menu bar (macOS: *SW3 Images → About SW3
+  Images*; Windows: *Help → About SW3 Images*). The text is in
+  [`ui/about.html`](ui/about.html).
+- Stop at any time; a failed image can be retried on its own.
+
+## Installing (for users)
+
+Download the latest installer from
+[Releases](https://github.com/Sustainable-WWW/SW3-Images-Desktop/releases/latest).
+
+- **macOS:** open the `.dmg` and drag SW3 Images to Applications. The app is
+  not notarized by Apple, so the first launch shows an "unidentified
+  developer" warning. Right-click the app and choose **Open**, or go to
+  **System Settings → Privacy & Security → Open Anyway**. You only need to do
+  this once, and updates install without the warning.
+- **Windows:** run `SW3 Images_x.y.z_x64-setup.exe`. If SmartScreen warns,
+  click **More info → Run anyway**. It installs per user, so no admin rights
+  are needed.
+
+## Development
+
+Requirements: Rust (stable), Node.js 20+, and on Windows also
+[NASM](https://nasm.us) (for mozjpeg's SIMD code).
 
 ```sh
-cargo run --release
+npm install        # installs the Tauri CLI
+npm run dev        # runs the app with hot reload of the Rust side
+npm run build      # builds installers into target/release/bundle/
 ```
 
-Then open **http://localhost:2500**.
+To preview only the UI in a normal browser (with fake data), run
+`node scripts/preview-ui.mjs` and open http://127.0.0.1:1420.
 
-## Configuration — the `.env` file
-
-Create a file called `.env` **in the project root** (same folder as
-`Cargo.toml`; copy [`.env.example`](.env.example) to get started). It is
-loaded automatically at startup and must never be committed to git
-(`.gitignore` already excludes it).
-
-```ini
-# Brevo lead notifications (both required to enable emails)
-BREVO_API_KEY=xkeysib-your-key-here
-LEAD_NOTIFY_EMAIL=info@sustainablewww.org
-# Optional: verified Brevo sender; defaults to LEAD_NOTIFY_EMAIL
-LEAD_FROM_EMAIL=info@sustainablewww.org
-```
-
-With those set, every time someone unlocks the 50-file limit you get an email
-("🌱 New SW3 Images lead: …") with their name, email, and how many files they
-compressed. The API key comes from Brevo → SMTP & API → API Keys, and the
-sender address must be a verified sender in your Brevo account. If the
-variables are missing, notifications are simply disabled — leads are still
-always appended to `data/leads.jsonl`. Emails are sent fire-and-forget: a
-Brevo outage can never fail or slow down an upload.
-
-All supported variables:
-
-| Env var | Default | Purpose |
-| --- | --- | --- |
-| `BREVO_API_KEY` | unset | Brevo v3 API key for lead notification emails |
-| `LEAD_NOTIFY_EMAIL` | unset | Recipient of lead notifications |
-| `LEAD_FROM_EMAIL` | `LEAD_NOTIFY_EMAIL` | Verified Brevo sender address |
-| `PORT` | `2500` | HTTP port |
-| `SW3_DATA` | `./data` | Storage directory (jobs + leads) |
-| `TRUST_PROXY` | off | Set `1` behind nginx so rate limiting uses the real client IP from `X-Forwarded-For` |
-| `SW3_CONCURRENCY` | `1` | How many images to compress at once. Default `1` keeps peak RAM predictable on a Raspberry Pi; raise only if you have plenty of memory and want more throughput. |
-
-## How the compression works
-
-SW3 Images doesn't use a fixed "quality 80" knob. For every image it *measures*
-perceptual quality and searches for the smallest file that still looks
-identical:
-
-1. The image is decoded and used as a perceptual reference
-   (EXIF orientation is applied first, so phone photos never come out rotated).
-2. Candidate encodings are compared against the reference with **DSSIM** —
-   structural similarity computed in Lab color space, which models how human
-   vision actually perceives error.
-3. A binary search finds the lowest encoder quality whose DSSIM stays under a
-   "visually lossless" ceiling. Quality is guaranteed by measurement, not by
-   guesswork.
-4. **Large images are judged at display scale**: anything over 1600 px on the
-   long edge is compared at the size a visitor actually sees on a web page.
-   Artifacts that only appear when zooming past 100% no longer block stronger
-   compression — that's where the big byte savings on multi-megapixel photos
-   come from, without any visible degradation at normal viewing size.
-5. **Probe search keeps CPU low**: for images with 2×+ the judge pixels, the
-   quality search runs on the small judge-scale copy (scored through a
-   simulation of the display downscale), and only 2-4 full-resolution encodes
-   verify and fine-tune the result — measured ~2.5× faster on a 12 MP photo
-   with byte-identical output.
-
-Per format:
-
-- **JPEG** — re-encoded with **mozjpeg** (trellis quantization, progressive
-  scans, optimized Huffman tables). Grayscale photos are detected and encoded
-  single-channel. If 4:2:0 chroma subsampling would visibly blur fine color
-  detail (red text, logos), SW3 Images automatically falls back to 4:4:4.
-- **PNG** — two candidates race: lossless recompression with **oxipng**, and
-  palette quantization with **imagequant** (the pngquant algorithm). The
-  quantized version is only used if DSSIM confirms it is visually identical;
-  the smaller winner ships.
-- **WebP** — lossy quality search via libwebp; graphics with few colors also
-  get a lossless candidate, and the smaller file wins.
-
-If no candidate beats the original file size, the original bytes are returned
-untouched — SW3 Images never inflates a file. Metadata (EXIF, GPS location…) is
-stripped, which shrinks files further and is kinder to visitors' privacy.
-
-There's also a CLI for quick testing/benchmarking:
+There's also a CLI for quick engine testing and benchmarking:
 
 ```sh
 cargo run --release --example compress_file -- photo.jpg logo.png
 ```
 
-## Features
-
-- Drag & drop up to **10 images** (30 MB each) — or **50** after leaving your
-  name and email (captured as leads, see below).
-- Live per-file progress, before/after sizes and savings percentage.
-- Optional **resize to max width** (aspect ratio preserved, never upscales)
-  before compressing — for even bigger savings when full resolution isn't
-  needed.
-- Download files individually or all at once as a zip.
-- Results are kept on disk for **24 hours**, then deleted automatically
-  (sweep runs every 15 minutes; covered by tests).
-- Estimated yearly CO₂e savings shown after compression.
-- Same format in, same format out — no surprise conversions.
-
-## Leads
-
-When someone unlocks the 50-file limit, a line is appended to
-`data/leads.jsonl`:
-
-```json
-{"ts":1784659005,"name":"Test User","email":"test@example.com","files":11,"job_id":"49b1a3e0-…"}
-```
-
-One JSON object per line — easy to import anywhere (`jq -s` turns it into an
-array, or open it in any spreadsheet tool). The retention sweep never touches
-this file. Remember to mention the sign-up in your privacy policy (GDPR).
-
-## Abuse protection
-
-- **Rate limiting** — max 10 compression jobs per IP per 15 minutes
-  (sliding window, in-memory). Behind nginx, set `TRUST_PROXY=1` so the real
-  client IP from `X-Forwarded-For` is used.
-- **Honeypot** — an invisible `website` form field; bots that autofill it are
-  rejected.
-- **Content sniffing** — files are identified by magic bytes, not filename;
-  anything that isn't a real JPG/PNG/WebP is rejected before decoding.
-- Uploaded content is never public: results are reachable only via an
-  unguessable UUID link, and everything is deleted within 24 hours.
-
-If you later need stronger bot protection, [Cloudflare
-Turnstile](https://developers.cloudflare.com/turnstile/) in invisible mode is
-the natural next step (free tier, no user interaction).
-
-## Deploying on a Raspberry Pi (or any Linux server) with PM2
-
-Step by step, from a fresh Pi. Build **on the Pi** — a native ARM build is
-the least-friction path.
-
-**1. Install the build dependencies** (one time):
+## Tests
 
 ```sh
-sudo apt update
-sudo apt install -y build-essential git      # C compiler for mozjpeg/libwebp + git
-curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh   # Rust toolchain
-source "$HOME/.cargo/env"
+cargo test --workspace   # Rust: engine, file safety, batch pipeline, security config
+npm test                 # UI: helpers + static security checks
 ```
 
-**2. Clone and build** (Rust dependencies are fetched automatically by cargo):
+GitHub Actions ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs
+all of this on **macOS and Windows on every push and pull request**, together
+with clippy and a RustSec/npm vulnerability audit of all dependencies.
 
-```sh
-git clone https://github.com/<you>/sw3-images.git
-cd sw3-images
-cargo build --release                        # grab a coffee on a Pi 4 (~15-30 min)
-```
+What the security tests check:
 
-**3. Create your `.env`** in the project root (see Configuration above):
+- **Untrusted files:** formats are detected from their content (magic bytes),
+  not their names. Fake, corrupt, truncated and empty files fail cleanly, and
+  malformed EXIF data can't crash the parser (a panic bug found in the old
+  parser is fixed and covered by a test). Codec panics are caught per image.
+- **Writing files:** names are sanitized (`../`, drive letters, Windows
+  reserved names like `CON`), so nothing can be written outside the output
+  folder. Files are never overwritten, including when the output folder is
+  the same as the source folder or several workers write at once.
+- **Folder walking:** symlinked folders aren't followed, so symlink loops
+  can't cause endless scanning, and the output folder is never read back in.
+- **Webview lockdown:** a strict CSP (no inline or remote scripts, no eval,
+  IPC only), and the webview gets only the minimum permissions. The UI can't
+  access the file system, shell, updater or notification APIs, and can't
+  choose where files are written (only a native folder picker can). The About
+  window can only open a fixed list of links.
+- **UI code:** no `innerHTML` or other HTML sinks, since file names from disk
+  are always written as text. No inline handlers and no remote resources.
+- **Updates:** they must come from this GitHub repository over HTTPS and be
+  signed. A test also fails if a private signing key is ever committed.
 
-```sh
-cp .env.example .env
-nano .env                                    # fill in the Brevo key + emails
-```
+## Releasing and auto-updates
 
-**4. Start it with PM2** — runs on port 2500 and **restarts automatically if
-it crashes** (`autorestart` is set in the config, plus a memory ceiling so a
-runaway job can't take down the Pi):
+The app checks
+`https://github.com/Sustainable-WWW/SW3-Images-Desktop/releases/latest/download/latest.json`
+shortly after launch, then every 6 hours, and also from the menu: *Check for
+Updates…*. When an update exists, a small "Update & restart" button appears.
+Every download is checked against the public key in
+`src-tauri/tauri.conf.json` before it is installed.
 
-```sh
-sudo apt install -y nodejs npm && sudo npm install -g pm2   # if PM2 isn't installed yet
-pm2 start ecosystem.config.cjs               # runs ./target/release/sw3-images on :2500
-pm2 save                                     # remember the process list
-pm2 startup                                  # print the command that enables start-on-boot — run it
-```
+**One-time setup:** add the updater signing key as a repository secret.
 
-Useful afterwards: `pm2 status`, `pm2 logs sw3-images`, and after deploying a
-new build `git pull && cargo build --release && pm2 restart sw3-images`.
+1. GitHub → the repo → **Settings → Secrets and variables → Actions → New
+   repository secret**
+2. Name: `TAURI_SIGNING_PRIVATE_KEY`. Value: the full contents of
+   `~/.tauri/sw3-images-updater.key` on the machine where it was generated.
+   The key has no password, so `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` isn't
+   needed.
 
-Then put nginx in front for the subdomain + TLS — a ready-made config with
-the required `client_max_body_size` and proxy timeouts is in
-[`deploy/nginx-sw3-images.conf`](deploy/nginx-sw3-images.conf):
+> ⚠️ Back up `~/.tauri/sw3-images-updater.key` somewhere safe, like a
+> password manager. If it is lost, installed apps can no longer be updated
+> automatically. Never commit it.
 
-```sh
-sudo cp deploy/nginx-sw3-images.conf /etc/nginx/sites-available/sw3-images
-sudo ln -s /etc/nginx/sites-available/sw3-images /etc/nginx/sites-enabled/
-sudo certbot --nginx -d images.sustainablewww.se
-sudo nginx -t && sudo systemctl reload nginx
-```
+**Each release:**
 
-`ecosystem.config.cjs` sets `TRUST_PROXY=1` and caps memory at 700 MB so a
-runaway job can't take down the Pi. A Pi 4/5 handles typical batches fine;
-compression is CPU-bound, so expect a large photo to take a few seconds.
+1. Bump `version` in [`src-tauri/Cargo.toml`](src-tauri/Cargo.toml) (e.g.
+   `0.2.0`) and commit.
+2. `git tag v0.2.0 && git push origin main v0.2.0`
+
+The [release workflow](.github/workflows/release.yml) runs the tests, builds
+the macOS (Apple Silicon) `.dmg` and the Windows `-setup.exe`, and publishes a
+GitHub Release with `latest.json`. Installed apps pick it up automatically.
+
+## How the compression works
+
+SW3 Images doesn't use a fixed "quality 80" setting. For every image it
+*measures* perceptual quality and searches for the smallest file that still
+looks identical:
+
+1. The image is decoded and used as a reference (EXIF orientation is applied
+   first, so phone photos never come out rotated).
+2. Each candidate encoding is compared with the reference using **DSSIM**, a
+   structural-similarity measure in Lab color space that models how people
+   actually see differences.
+3. A binary search finds the lowest encoder quality whose DSSIM stays under a
+   "visually lossless" ceiling.
+4. **Large images are judged at display scale.** Anything over 1600 px on the
+   long edge is compared at the size it is normally viewed at.
+5. **Probe search keeps CPU use low.** For big images, the search runs on a
+   small copy, and only 2–4 full-resolution encodes are used to confirm and
+   fine-tune the result.
+
+By format:
+
+- **JPEG** is re-encoded with **mozjpeg** (trellis quantization, progressive
+  scans). Grayscale photos are encoded as one channel. When 4:2:0 chroma
+  subsampling would blur fine color detail, it falls back to 4:4:4.
+- **PNG** tries two options: lossless **oxipng** and **imagequant** palette
+  quantization, which is only used if DSSIM says it looks identical. The
+  smaller one wins.
+- **WebP** uses a lossy quality search via libwebp. Graphics with few colors
+  also get a lossless candidate.
+- **Convert to WebP** runs the WebP search against the decoded source pixels,
+  so the converted file is held to the same visually lossless standard.
+
+When the format and size stay the same, SW3 Images never makes a file
+bigger: if nothing beats the original, the original is kept. Metadata (EXIF,
+GPS) is removed, which saves space and protects privacy.
 
 ## Project layout
 
 | Path | Purpose |
 | --- | --- |
-| `src/server.rs` | Axum web server: upload, polling, downloads, rate limiting, retention |
-| `src/compress.rs` | The compression engine (DSSIM-guided quality search) |
-| `src/jobs.rs` | Job registry, on-disk layout, 24 h cleanup |
-| `src/main.rs` | Thin binary entry point |
-| `static/index.html` | The whole frontend (embedded into the binary) |
-| `tests/api.rs` | HTTP integration tests against the real router |
-| `ecosystem.config.cjs` | PM2 process config for the Raspberry Pi |
-| `deploy/nginx-sw3-images.conf` | nginx reverse-proxy sample for the subdomain |
-| `data/jobs/<id>/` | Per-job storage: `meta.json`, `out/` results, lazy zip |
-| `data/leads.jsonl` | Name/email lead capture (never auto-deleted) |
-
-## API
-
-| Endpoint | Description |
-| --- | --- |
-| `POST /api/jobs` | Multipart upload (`file` ×N, optional `name` + `email`) → job JSON |
-| `GET /api/jobs/{id}` | Job status: per-file progress, sizes, notes |
-| `GET /api/jobs/{id}/files/{idx}` | Download one compressed file |
-| `GET /api/jobs/{id}/zip` | Download everything as `sw3-images-compressed.zip` |
-
-## Tests
-
-```sh
-cargo test
-```
-
-29 tests: unit coverage of the engine (visual-losslessness re-verified on
-output, shrink behavior for all three formats, EXIF orientation, display-scale
-judging, format sniffing, heuristics), the job registry (state machine,
-restart recovery, **24 h retention deletion**), and full HTTP integration
-tests (upload → compress → poll → download → zip, file limits, email unlock +
-lead capture, honeypot, rate limiting, invalid input).
-
-## Notes for future work
-
-Planned: user accounts + database for compression history, subscriptions, and
-a public API. The `data/jobs` layout and JSON endpoints were designed so a
-database can slot in without changing the engine.
+| `src/compress.rs` | The compression engine (DSSIM-guided quality search, WebP conversion) |
+| `src/files.rs` | Folder scanning, header-only probing, safe output naming and writing |
+| `src-tauri/src/lib.rs` | Tauri commands: scan, pick, batch start/stop/retry, notifications |
+| `src-tauri/src/batch.rs` | Parallel worker pool, cancellation, progress events |
+| `src-tauri/src/menu.rs` | Native menu bar and the About window |
+| `src-tauri/src/updates.rs` | GitHub-based self-updates |
+| `src-tauri/src/settings.rs` | Output-folder preference |
+| `src-tauri/tauri.conf.json` | Window, CSP, bundle and updater config |
+| `src-tauri/capabilities/` | What the webview is allowed to call |
+| `src-tauri/tests/security.rs` | Security configuration tests |
+| `ui/` | Frontend (plain HTML/CSS/JS, no build step) |
+| `ui/tests/` | UI unit and static security tests |
+| `.github/workflows/` | CI (tests on every push) and release builds |

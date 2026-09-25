@@ -1,0 +1,86 @@
+# Builds signed-for-update installers for macOS (Apple Silicon) and Windows
+# and publishes them as a GitHub Release, together with the latest.json
+# manifest the in-app updater reads.
+#
+# To release: bump `version` in src-tauri/Cargo.toml, commit, then
+#   git tag v0.2.0 && git push origin v0.2.0
+#
+# Requires the repository secret TAURI_SIGNING_PRIVATE_KEY (contents of
+# ~/.tauri/sw3-images-updater.key). If the key has a password, also set
+# TAURI_SIGNING_PRIVATE_KEY_PASSWORD.
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build (${{ matrix.name }})
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS Apple Silicon
+            os: macos-latest
+            target: aarch64-apple-darwin
+            args: --target aarch64-apple-darwin
+          - name: Windows
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            args: --target x86_64-pc-windows-msvc
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Tag must match the app version
+        shell: bash
+        run: |
+          version=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "v$version" != "$GITHUB_REF_NAME" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match src-tauri/Cargo.toml version $version"
+            exit 1
+          fi
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Install NASM
+        if: runner.os == 'Windows'
+        uses: ilammy/setup-nasm@v1
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - run: npm ci
+
+      - name: Run the test suite before shipping
+        run: |
+          npm test
+          cargo test --workspace --locked
+
+      - uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          tagName: ${{ github.ref_name }}
+          releaseName: SW3 Images ${{ github.ref_name }}
+          releaseBody: |
+            **macOS (Apple Silicon):** download the `.dmg`, drag SW3 Images to Applications. The first time, right-click the app → Open (or System Settings → Privacy & Security → Open Anyway), because the app isn't notarized by Apple.
+            **Windows:** download and run the `-setup.exe`. If SmartScreen warns, click More info → Run anyway.
+
+            Already installed? The app updates itself.
+          releaseDraft: false
+          prerelease: false
+          updaterJsonPreferNsis: true
+          args: ${{ matrix.args }}

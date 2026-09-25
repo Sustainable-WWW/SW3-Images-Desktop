@@ -1,4 +1,4 @@
-//! EcoPixel compression engine.
+//! SW3 Images compression engine.
 //!
 //! Strategy: every candidate encoding is verified against the original with
 //! DSSIM (structural similarity in Lab color space). We binary-search for the
@@ -72,23 +72,37 @@ pub struct Compressed {
     pub data: Vec<u8>,
     /// Human-readable description of what the engine decided.
     pub note: String,
+    /// Format of `data` (differs from the input when converting to WebP).
+    pub format: Format,
+    /// Pixel dimensions of `data` (after EXIF orientation and resizing).
+    pub width: u32,
+    pub height: u32,
+}
+
+/// What to do with an image besides compressing it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+pub struct Options {
+    /// Downscale images wider than this (never upscales, keeps aspect ratio).
+    pub max_width: Option<u32>,
+    /// Re-encode JPEG/PNG input as WebP.
+    pub to_webp: bool,
 }
 
 /// Progress callback, called with values in `0.0..=1.0`.
 pub type Progress<'a> = &'a (dyn Fn(f32) + Send + Sync);
 
-pub fn compress(
-    input: &[u8],
-    format: Format,
-    max_width: Option<u32>,
-    progress: Progress,
-) -> Result<Compressed> {
+/// Compress keeping the input format. See [`compress_with`].
+pub fn compress(input: &[u8], format: Format, max_width: Option<u32>, progress: Progress) -> Result<Compressed> {
+    compress_with(input, format, &Options { max_width, to_webp: false }, progress)
+}
+
+pub fn compress_with(input: &[u8], format: Format, opts: &Options, progress: Progress) -> Result<Compressed> {
     progress(0.02);
     let mut img = decode(input, format)?;
 
     // Optional pre-compression downscale (never upscales, keeps aspect ratio).
     let mut resized = false;
-    if let Some(mw) = max_width {
+    if let Some(mw) = opts.max_width {
         let mw = mw.clamp(16, 8192);
         if img.width() > mw {
             img = img.resize(mw, u32::MAX, image::imageops::FilterType::Lanczos3);
@@ -97,32 +111,41 @@ pub fn compress(
     }
     progress(0.10);
 
-    // When the pixels were resized, the original bytes are no longer a valid
-    // fallback — every path must produce a fresh encode of the resized image.
-    let original = if resized { None } else { Some(input) };
-    let result = match format {
+    let out_format = if opts.to_webp { Format::Webp } else { format };
+    let converted = out_format != format;
+    // When the pixels were resized or the format changes, the original bytes
+    // are no longer a valid fallback — every path must produce a fresh encode.
+    let original = if resized || converted { None } else { Some(input) };
+    let result = match out_format {
         Format::Jpeg => compress_jpeg(original, &img, progress)?,
         Format::Png => compress_png(original, &img, progress)?,
         Format::Webp => compress_webp(original, &img, progress)?,
     };
     progress(1.0);
 
+    let (width, height) = (img.width(), img.height());
+    let done = |data: Vec<u8>, note: String| Compressed { data, note, format: out_format, width, height };
+
+    if converted {
+        let prefix = if resized { format!("Resized to {width}×{height} · ") } else { String::new() };
+        return Ok(done(result.data, format!("{prefix}Converted to {}", result.note)));
+    }
     if resized {
         // Dimensions changed on request; the original is no longer comparable.
-        return Ok(Compressed {
-            note: format!("Resized to {}×{} · {}", img.width(), img.height(), result.note),
-            data: result.data,
-        });
+        return Ok(done(result.data, format!("Resized to {width}×{height} · {}", result.note)));
     }
     // Never ship a file bigger than what the user already had.
     if result.data.len() >= input.len() {
-        Ok(Compressed {
-            data: input.to_vec(),
-            note: "Already optimal — kept original".into(),
-        })
+        Ok(done(input.to_vec(), "Already optimal — kept original".into()))
     } else {
-        Ok(result)
+        Ok(done(result.data, result.note))
     }
+}
+
+/// Encoder output before the top-level bookkeeping in [`compress_with`].
+struct Encoded {
+    data: Vec<u8>,
+    note: String,
 }
 
 fn decode(input: &[u8], format: Format) -> Result<DynamicImage> {
@@ -312,6 +335,7 @@ fn quality_search(
 /// the perceptual gate passes, then probe downward to claw back any
 /// conservatism in the probe simulation. Typically costs 2-4 full encodes
 /// instead of the 8 a full-resolution search would need.
+#[allow(clippy::too_many_arguments)]
 fn finalize_full(
     q0: u8,
     lo: u8,
@@ -383,7 +407,7 @@ fn jpeg_pixels(img: &DynamicImage, gray: bool) -> Pixels {
     Pixels { data, w, h }
 }
 
-fn compress_jpeg(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Compressed> {
+fn compress_jpeg(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Encoded> {
     let reference = Reference::new(img)?;
 
     // Grayscale photos get a dedicated single-channel encode (~2/3 smaller).
@@ -427,7 +451,7 @@ fn compress_jpeg(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -
     // Pass 1: standard 4:2:0 chroma subsampling (best compression).
     if let Some((data, q)) = run_pass(false, 35, 94, (0.10, 0.72), (0.72, 0.92))? {
         let mode = if gray { "grayscale" } else { "4:2:0" };
-        return Ok(Compressed {
+        return Ok(Encoded {
             data,
             note: format!("JPEG q{q} {mode}, progressive, trellis-optimized"),
         });
@@ -436,17 +460,17 @@ fn compress_jpeg(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -
     // Pass 2: sharp colored edges (red text, logos) can defeat subsampling.
     // Retry with full-resolution chroma before giving up.
     match run_pass(true, 50, 97, (0.60, 0.85), (0.85, 0.95))? {
-        Some((data, q)) => Ok(Compressed {
+        Some((data, q)) => Ok(Encoded {
             data,
             note: format!("JPEG q{q} 4:4:4 (fine color detail preserved)"),
         }),
         None => match input {
-            Some(orig) => Ok(Compressed {
+            Some(orig) => Ok(Encoded {
                 data: orig.to_vec(),
                 note: "Kept original (re-encoding would cost quality)".into(),
             }),
             // Resized: no original to fall back to — top quality encode.
-            None => Ok(Compressed {
+            None => Ok(Encoded {
                 data: encode_mozjpeg(&full.data, full.w, full.h, colorspace, 96.0, true)?,
                 note: "JPEG q96 4:4:4".into(),
             }),
@@ -506,7 +530,7 @@ fn is_grayscale(img: &DynamicImage) -> bool {
 // PNG — lossy palette (imagequant) when invisible, else lossless (oxipng)
 // ---------------------------------------------------------------------------
 
-fn compress_png(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Compressed> {
+fn compress_png(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Encoded> {
     let reference = Reference::new(img)?;
     let (w, h) = (img.width() as usize, img.height() as usize);
     let rgba = img.to_rgba8();
@@ -546,19 +570,19 @@ fn compress_png(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) ->
     progress(0.95);
 
     match (lossy, lossless) {
-        (Some(a), Some(b)) if a.len() < b.len() => Ok(Compressed {
+        (Some(a), Some(b)) if a.len() < b.len() => Ok(Encoded {
             data: a,
             note: "PNG palette-quantized (visually lossless) + oxipng".into(),
         }),
-        (Some(a), None) => Ok(Compressed {
+        (Some(a), None) => Ok(Encoded {
             data: a,
             note: "PNG palette-quantized (visually lossless) + oxipng".into(),
         }),
-        (_, Some(b)) => Ok(Compressed {
+        (_, Some(b)) => Ok(Encoded {
             data: b,
             note: "PNG losslessly recompressed (oxipng)".into(),
         }),
-        (None, None) => Ok(Compressed {
+        (None, None) => Ok(Encoded {
             data: lossless_src,
             note: "Kept original".into(),
         }),
@@ -611,7 +635,7 @@ fn oxipng_optimize(png: &[u8], thorough: bool) -> Result<Vec<u8>> {
 // WebP — lossy quality search, lossless candidate for graphics
 // ---------------------------------------------------------------------------
 
-fn compress_webp(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Compressed> {
+fn compress_webp(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Encoded> {
     let reference = Reference::new(img)?;
     let (w, h) = (img.width(), img.height());
     let rgba = img.to_rgba8();
@@ -652,22 +676,22 @@ fn compress_webp(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -
 
     let lossy_note = |q: u8| format!("WebP q{q} (perceptually tuned)");
     match (found, lossless) {
-        (Some((a, _)), Some(b)) if b.len() < a.len() => Ok(Compressed {
+        (Some((a, _)), Some(b)) if b.len() < a.len() => Ok(Encoded {
             data: b,
             note: "WebP lossless (graphic content)".into(),
         }),
-        (Some((a, q)), _) => Ok(Compressed { data: a, note: lossy_note(q) }),
-        (None, Some(b)) => Ok(Compressed {
+        (Some((a, q)), _) => Ok(Encoded { data: a, note: lossy_note(q) }),
+        (None, Some(b)) => Ok(Encoded {
             data: b,
             note: "WebP lossless (quality could not be preserved lossily)".into(),
         }),
         (None, None) => match input {
-            Some(orig) => Ok(Compressed {
+            Some(orig) => Ok(Encoded {
                 data: orig.to_vec(),
                 note: "Kept original".into(),
             }),
             // Resized: no original to fall back to — top quality encode.
-            None => Ok(Compressed {
+            None => Ok(Encoded {
                 data: encode_webp_lossy(rgba.as_raw(), w, h, 95.0)?,
                 note: "WebP q95".into(),
             }),
@@ -705,8 +729,9 @@ fn likely_graphic(rgba: &image::RgbaImage) -> bool {
 // EXIF orientation (JPEG)
 // ---------------------------------------------------------------------------
 
-/// Minimal EXIF walk: find the Orientation tag (0x0112) in IFD0.
-fn exif_orientation(jpeg: &[u8]) -> Option<u16> {
+/// Minimal EXIF walk: find the Orientation tag (0x0112) in IFD0. Works on a
+/// truncated prefix of the file too, and never panics on malformed input.
+pub(crate) fn exif_orientation(jpeg: &[u8]) -> Option<u16> {
     // Locate APP1 "Exif" segment.
     let mut i = 2usize;
     while i + 4 <= jpeg.len() {
@@ -718,8 +743,12 @@ fn exif_orientation(jpeg: &[u8]) -> Option<u16> {
             return None; // start of scan, no EXIF found
         }
         let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
-        if marker == 0xE1 && i + 4 + 6 <= jpeg.len() && &jpeg[i + 4..i + 10] == b"Exif\0\0" {
-            return parse_tiff_orientation(&jpeg[i + 10..i + 2 + len]);
+        if len < 2 {
+            return None; // corrupt segment length
+        }
+        if marker == 0xE1 && len >= 8 && i + 10 <= jpeg.len() && &jpeg[i + 4..i + 10] == b"Exif\0\0" {
+            let end = (i + 2 + len).min(jpeg.len());
+            return parse_tiff_orientation(&jpeg[i + 10..end]);
         }
         i += 2 + len;
     }
@@ -934,6 +963,28 @@ mod tests {
     }
 
     #[test]
+    fn malformed_exif_never_panics() {
+        // APP1 "Exif" segments with impossible lengths, truncated TIFF
+        // headers and IFD offsets pointing past the end must all be rejected
+        // gracefully — these bytes come straight from untrusted files.
+        let mut cases: Vec<Vec<u8>> = Vec::new();
+        for len in [0u16, 1, 2, 5, 7, 8, 9, 0xFFFF] {
+            let mut j = vec![0xFF, 0xD8, 0xFF, 0xE1];
+            j.extend_from_slice(&len.to_be_bytes());
+            j.extend_from_slice(b"Exif\0\0II*\0");
+            cases.push(j);
+        }
+        let mut far_ifd = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x20];
+        far_ifd.extend_from_slice(b"Exif\0\0II*\0\xFF\xFF\xFF\x7F");
+        far_ifd.extend_from_slice(&[0u8; 16]);
+        cases.push(far_ifd);
+        cases.push(vec![0xFF, 0xD8, 0xFF]);
+        for c in &cases {
+            let _ = exif_orientation(c);
+        }
+    }
+
+    #[test]
     fn orientation_variants_transform_dimensions() {
         let img = photo(40, 20);
         for o in [1u16, 2, 3, 4] {
@@ -1009,6 +1060,59 @@ mod tests {
         let first = compress(&encode(&img, image::ImageFormat::Jpeg), Format::Jpeg, None, NOOP).unwrap();
         let second = compress(&first.data, Format::Jpeg, None, NOOP).unwrap();
         assert!(second.data.len() <= first.data.len());
+    }
+
+    #[test]
+    fn jpeg_converts_to_webp_and_stays_visually_lossless() {
+        let img = photo(320, 240);
+        let input = encode(&img, image::ImageFormat::Jpeg);
+        let opts = Options { max_width: None, to_webp: true };
+        let out = compress_with(&input, Format::Jpeg, &opts, NOOP).unwrap();
+        assert_eq!(out.format, Format::Webp);
+        assert_eq!(Format::from_magic(&out.data), Some(Format::Webp));
+        assert_eq!((out.width, out.height), (320, 240));
+        assert!(out.note.starts_with("Converted to WebP"), "note: {}", out.note);
+
+        let decoded_in = image::load_from_memory(&input).unwrap();
+        let reference = Reference::new(&decoded_in).unwrap();
+        let d = reference.distance(&out.data, image::ImageFormat::WebP).unwrap();
+        assert!(d <= DSSIM_WEBP * 1.05, "dssim {d} exceeds threshold");
+    }
+
+    #[test]
+    fn png_with_alpha_converts_to_webp_and_resizes() {
+        let img = DynamicImage::ImageRgba8(ImageBuffer::from_fn(400, 200, |x, y| {
+            Rgba([(x % 255) as u8, (y % 255) as u8, 120, if x < 200 { 255 } else { 0 }])
+        }));
+        let input = encode(&img, image::ImageFormat::Png);
+        let opts = Options { max_width: Some(200), to_webp: true };
+        let out = compress_with(&input, Format::Png, &opts, NOOP).unwrap();
+        assert_eq!(out.format, Format::Webp);
+        assert_eq!((out.width, out.height), (200, 100));
+        let dec = image::load_from_memory_with_format(&out.data, image::ImageFormat::WebP).unwrap();
+        assert_eq!((dec.width(), dec.height()), (200, 100));
+        assert!(dec.color().has_alpha(), "transparency must survive the conversion");
+        assert!(out.note.contains("Resized to 200×100"), "note: {}", out.note);
+    }
+
+    #[test]
+    fn webp_flag_on_webp_input_keeps_webp() {
+        let img = photo(200, 150);
+        let input = webp::Encoder::from_rgba(img.to_rgba8().as_raw(), 200, 150).encode(98.0).to_vec();
+        let opts = Options { max_width: None, to_webp: true };
+        let out = compress_with(&input, Format::Webp, &opts, NOOP).unwrap();
+        assert_eq!(out.format, Format::Webp);
+        assert!(out.data.len() <= input.len(), "same-format path never inflates");
+    }
+
+    #[test]
+    fn garbage_input_is_an_error_not_a_panic() {
+        let mut bytes = vec![0xFF, 0xD8, 0xFF, 0xE0];
+        bytes.extend(std::iter::repeat_n(0x42, 500));
+        assert!(compress(&bytes, Format::Jpeg, None, NOOP).is_err());
+        let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
+        png.extend(std::iter::repeat_n(0, 64));
+        assert!(compress(&png, Format::Png, None, NOOP).is_err());
     }
 
     #[test]

@@ -1,19 +1,16 @@
+[workspace]
+members = [".", "src-tauri"]
+resolver = "2"
+
 [package]
 name = "sw3-images"
 version = "0.1.0"
 edition = "2021"
-description = "SW3 Images — smart, visually-lossless image compression and resizing for the web"
+description = "SW3 Images engine — smart, visually-lossless image compression, resizing and WebP conversion"
 license = "MIT"
 
 [dependencies]
-# Web server
-axum = { version = "0.8", features = ["multipart"] }
-tokio = { version = "1", features = ["full"] }
-
-# Serialization
 serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-uuid = { version = "1", features = ["v4", "serde"] }
 
 # Image decoding / pixel handling
 image = "0.25"
@@ -29,21 +26,12 @@ webp = "0.3"           # WebP: lossy + lossless via libwebp
 # Perceptual quality metric (SSIM in Lab color space)
 dssim-core = "3"
 
-# Downloads
-zip = { version = "2", default-features = false }
-
 anyhow = "1"
-
-# Config + lead notifications
-dotenvy = "0.15"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-
-[dev-dependencies]
-tower = { version = "0.5", features = ["util"] }
-http-body-util = "0.1"
 
 [profile.release]
 lto = "thin"
+codegen-units = 1
+strip = true
 
 # Image codecs are unusably slow unoptimized; keep deps fast even in dev builds
 [profile.dev.package."*"]

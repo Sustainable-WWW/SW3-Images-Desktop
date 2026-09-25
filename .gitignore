@@ -1,3 +1,7 @@
 /target
 /data
 .env
+/node_modules
+/src-tauri/gen/schemas
+.DS_Store
+*.key

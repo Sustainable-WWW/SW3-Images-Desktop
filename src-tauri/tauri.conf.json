@@ -1,0 +1,77 @@
+{
+  "$schema": "https://schema.tauri.app/config/2",
+  "productName": "SW3 Images",
+  "identifier": "se.sustainablewww.sw3images",
+  "build": {
+    "frontendDist": "../ui"
+  },
+  "app": {
+    "withGlobalTauri": true,
+    "windows": [
+      {
+        "label": "main",
+        "title": "SW3 Images",
+        "width": 1000,
+        "height": 700,
+        "minWidth": 860,
+        "minHeight": 600,
+        "center": true,
+        "titleBarStyle": "Overlay",
+        "hiddenTitle": true,
+        "dragDropEnabled": true
+      }
+    ],
+    "security": {
+      "csp": {
+        "default-src": "'self'",
+        "script-src": "'self'",
+        "style-src": "'self'",
+        "img-src": "'self' data:",
+        "font-src": "'self'",
+        "connect-src": "ipc: http://ipc.localhost",
+        "object-src": "'none'",
+        "base-uri": "'none'",
+        "form-action": "'none'",
+        "frame-ancestors": "'none'"
+      },
+      "freezePrototype": true
+    }
+  },
+  "bundle": {
+    "active": true,
+    "targets": ["app", "dmg", "nsis"],
+    "createUpdaterArtifacts": true,
+    "category": "Graphics and Design",
+    "shortDescription": "Compress, resize and convert images for the web",
+    "longDescription": "SW3 Images makes images dramatically smaller with no visible quality loss, using a perceptually guided compression engine written in Rust. Made by Sustainable WWW Sweden AB.",
+    "publisher": "Sustainable WWW Sweden AB",
+    "copyright": "© Sustainable WWW Sweden AB",
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "macOS": {
+      "signingIdentity": "-",
+      "minimumSystemVersion": "11.0"
+    },
+    "windows": {
+      "nsis": {
+        "installMode": "currentUser"
+      }
+    }
+  },
+  "plugins": {
+    "updater": {
+      "pubkey": "dW50cnVzdGVkIGNvbW1lbnQ6IG1pbmlzaWduIHB1YmxpYyBrZXk6IDI0NzYzNzgxNzRDMjlFNTYKUldSV25zSjBnVGQySkpUYXVhc3Z1bmQxaC92NHdIUWl0bUZMN3k4aHNLL1h4WHdnNk5zYWVNZEoK",
+      "endpoints": [
+        "https://github.com/Sustainable-WWW/SW3-Images-Desktop/releases/latest/download/latest.json"
+      ],
+      "windows": {
+        "installMode": "passive"
+      }
+    }
+  }
+}

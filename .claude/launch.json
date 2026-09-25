@@ -2,10 +2,12 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "sw3-images",
-      "runtimeExecutable": "cargo",
-      "runtimeArgs": ["run"],
-      "port": 2500
+      "name": "ui-preview",
+      "runtimeExecutable": "node",
+      "runtimeArgs": [
+        "/Users/michaelandersen/Documents/SWWW Projects/SW3-Images-Desktop/scripts/preview-ui.mjs"
+      ],
+      "port": 1420
     }
   ]
 }
