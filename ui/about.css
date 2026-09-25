@@ -1,15 +1,26 @@
 body.about { background: var(--card); overflow-y: auto; }
 .about-drag { position: fixed; top: 0; left: 0; right: 0; height: 32px; z-index: 1; }
-.about-body { flex: 1; padding: 34px 34px 4px; text-align: center; }
-.about-icon { width: 76px; height: 76px; display: block; margin: 0 auto 8px; }
+.about-body { flex: 1; padding: 30px 32px 2px; text-align: center; }
+.about-icon { width: 68px; height: 68px; display: block; margin: 0 auto 6px; }
 .about h1 { font-family: var(--font-head); font-weight: 700; font-size: 22px; letter-spacing: -0.02em; color: var(--ink); }
 .about h1 span { color: var(--green); }
 .about-version { color: var(--muted); font-size: 13px; margin-top: 2px; font-variant-numeric: tabular-nums; }
 .about-lead { font-family: var(--font-head); font-weight: 600; font-size: 15px; color: var(--green-ink); margin: 12px auto 12px; max-width: 330px; line-height: 1.4; }
-.about section { text-align: left; margin-top: 12px; }
+.about section { text-align: left; margin-top: 10px; }
 .about h2 { font-family: var(--font-head); font-weight: 600; font-size: 13px; color: var(--ink); margin-bottom: 2px; }
-.about section p { font-size: 13px; line-height: 1.45; color: var(--text); user-select: text; -webkit-user-select: text; cursor: text; }
+.about section p { font-size: 12.5px; line-height: 1.42; color: var(--text); user-select: text; -webkit-user-select: text; cursor: text; }
 .about-made p { cursor: default; }
 .about-foot { flex: none; display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 2px 4px; padding: 10px 20px 14px; color: var(--muted); font-size: 12.5px; }
 .about-foot .btn-text { font-size: 12.5px; }
 .about-foot p { flex-basis: 100%; text-align: center; margin-top: 2px; }
+.about-disclaimer { font-size: 11.5px; opacity: .85; }
+
+/* Open-source licenses window */
+body.licenses { background: var(--card); overflow-y: auto; user-select: text; -webkit-user-select: text; cursor: auto; }
+.licenses main { padding: 28px 32px 40px; max-width: 900px; }
+.licenses h1 { font-family: var(--font-head); font-weight: 700; font-size: 22px; color: var(--ink); margin-bottom: 8px; }
+.licenses h1 + p { font-size: 13.5px; line-height: 1.5; margin-bottom: 18px; }
+.licenses section { border-top: 1px solid var(--line); padding-top: 14px; margin-top: 14px; }
+.licenses h2 { font-family: var(--font-head); font-weight: 600; font-size: 14px; color: var(--ink); }
+.licenses .used { font-size: 12.5px; color: var(--muted); margin: 3px 0 8px; }
+.licenses pre { white-space: pre-wrap; word-break: break-word; font-size: 11.5px; line-height: 1.45; background: #f6f7f4; border-radius: 10px; padding: 12px 14px; color: var(--text); }

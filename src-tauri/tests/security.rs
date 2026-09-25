@@ -27,6 +27,7 @@ fn csp_is_strict() {
         assert!(!v.contains("http:") && !v.contains("https:") || directive == "connect-src", "{directive} allows remote origins");
         assert!(!v.split_whitespace().any(|t| t == "*"), "{directive} allows everything");
     }
+    assert_eq!(csp["img-src"], "'self'", "no data: or remote images");
     let connect = csp["connect-src"].as_str().unwrap();
     for token in connect.split_whitespace() {
         assert!(token == "ipc:" || token == "http://ipc.localhost", "connect-src may only reach Tauri IPC, got {token}");
@@ -46,6 +47,10 @@ fn webview_permissions_are_minimal() {
         assert!(allowed.contains(p), "unexpected webview permission {p}: file system, shell, dialog, updater and notification access must stay in Rust");
     }
     assert!(cap.get("remote").is_none(), "remote URLs must never get IPC access");
+    assert!(
+        !cap["windows"].as_array().unwrap().iter().any(|w| w == "licenses"),
+        "the static licenses window needs no IPC access"
+    );
 
     // No other capability files may sneak in extra permissions.
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("capabilities");
@@ -114,4 +119,58 @@ fn no_private_key_is_committed() {
     let mut hits = Vec::new();
     walk(root, &mut hits);
     assert!(hits.is_empty(), "private signing key material found in the repo: {hits:?}");
+}
+
+/// Privacy promise: images never leave the computer. The engine and the app
+/// crate must not pull in an HTTP client of their own — the only network
+/// code is Tauri's updater plugin, which fetches the release manifest.
+#[test]
+fn no_network_clients_besides_the_updater() {
+    let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    for manifest in [manifest_dir.join("Cargo.toml"), manifest_dir.parent().unwrap().join("Cargo.toml")] {
+        let text = std::fs::read_to_string(&manifest).unwrap();
+        let deps: Vec<&str> = text
+            .lines()
+            .skip_while(|l| !l.starts_with("[dependencies]"))
+            .skip(1)
+            .take_while(|l| !l.starts_with('['))
+            .filter_map(|l| l.split('=').next())
+            .map(str::trim)
+            .filter(|n| !n.is_empty() && !n.starts_with('#'))
+            .collect();
+        for banned in ["reqwest", "hyper", "ureq", "isahc", "curl", "surf", "attohttpc", "tauri-plugin-http", "tauri-plugin-upload"] {
+            assert!(!deps.contains(&banned), "{} depends on network client {banned}", manifest.display());
+        }
+    }
+    let conf = load("tauri.conf.json");
+    let plugins: Vec<&String> = conf["plugins"].as_object().unwrap().keys().collect();
+    assert_eq!(plugins, vec!["updater"], "only the updater plugin is configured");
+}
+
+#[test]
+fn license_files_are_present_and_shipped() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let license = std::fs::read_to_string(root.join("LICENSE")).unwrap();
+    assert!(license.starts_with("MIT License"), "own code is MIT-licensed");
+    let notices = std::fs::read_to_string(root.join("THIRD-PARTY-LICENSES.md")).unwrap();
+    for must in ["libwebp", "Additional IP Rights Grant", "libdeflate", "Independent JPEG Group", "SIL Open Font License", "ssimulacra2", "quantizr"] {
+        assert!(notices.contains(must), "third-party notices must cover {must}");
+    }
+    // License section titles (full texts may mention the GPL, e.g. MPL-2.0's
+    // compatibility clause).
+    for title in notices.lines().filter(|l| l.starts_with("## ")) {
+        assert!(!title.contains("GPL") && !title.contains("General Public License"), "copyleft dependency crept in: {title}");
+    }
+    let page = std::fs::read_to_string(root.join("ui/licenses.html")).unwrap();
+    assert!(page.contains("libwebp") && page.len() > 100_000, "in-app license page is generated");
+}
+
+/// A release can't be tagged without notes: the release workflow publishes
+/// the CHANGELOG.md section for the app's version.
+#[test]
+fn changelog_documents_the_current_version() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+    let changelog = std::fs::read_to_string(root.join("CHANGELOG.md")).unwrap();
+    let heading = format!("## [{}]", env!("CARGO_PKG_VERSION"));
+    assert!(changelog.lines().any(|l| l.starts_with(&heading)), "CHANGELOG.md needs a section `{heading}`");
 }

@@ -1,6 +1,7 @@
 // Browser-only stand-in for the Tauri backend, used when ui/index.html is
-// opened outside the app (design previews). Never loaded inside SW3 Images:
-// app.js only imports this when window.__TAURI__ is missing.
+// opened outside the app (design previews via scripts/preview-ui.mjs). Not
+// part of the app bundle; app.js only imports it when window.__TAURI__ is
+// missing.
 
 const names = [
   "IMG_4821.jpg", "IMG_4822.jpg", "studio-shoot-01.png", "IMG_4830.jpg", "product-hero.png",
@@ -13,6 +14,7 @@ function fakeImages(count, offset = 0) {
     const name = names[(i + offset) % names.length].replace(/(\.\w+)$/, i >= names.length ? `-${i}$1` : "$1");
     const big = i % 3 !== 2;
     return {
+      id: offset + i + 1,
       path: `/Users/demo/Pictures/shoot/${offset}-${i}-${name}`,
       name,
       format: name.endsWith(".png") ? "png" : "jpeg",
@@ -69,13 +71,15 @@ export default {
         return null;
       case "start_batch":
         stopFlag = false;
-        setTimeout(() => runFake(args.items, args.options, args.onEvent), 50);
+        setTimeout(() => runFake(args.ids.map((id) => ({ id })), args.options, args.onEvent), 50);
         return 5;
       case "stop_batch":
         stopFlag = true;
         return null;
       case "retry_file":
-        setTimeout(() => runFake([args.item], args.options, { fn: (e) => e.kind !== "finished" && args.onEvent.fn(e) }, 1), 50);
+        setTimeout(() => runFake([{ id: args.id }], args.options, { fn: (e) => e.kind !== "finished" && args.onEvent.fn(e) }, 1), 50);
+        return null;
+      case "forget_images":
         return null;
       case "check_for_update":
         return null;
@@ -87,5 +91,5 @@ export default {
     return { fn };
   },
   onDragDrop() {},
-  onMenu() {},
+  on() {},
 };

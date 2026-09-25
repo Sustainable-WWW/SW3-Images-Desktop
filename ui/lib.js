@@ -18,6 +18,12 @@ export function savingsPct(orig, out) {
   return Math.max(0, Math.round(100 * (1 - out / orig)));
 }
 
+/** Whole-percent size increase (for outputs that grew). */
+export function growthPct(orig, out) {
+  if (!orig || orig <= 0 || out <= orig) return 0;
+  return Math.max(1, Math.round(100 * (out / orig - 1)));
+}
+
 /** "About 40 seconds left" etc. Returns "" when there is nothing to estimate. */
 export function formatEta(seconds) {
   if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "";

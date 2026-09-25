@@ -1,5 +1,6 @@
 # Runs the full test suite on every push and pull request, on both platforms
-# the app ships for, plus a scan of all dependencies for known vulnerabilities.
+# the app ships for, plus dependency checks: known vulnerabilities, licenses
+# that allow redistribution, and up-to-date third-party license notices.
 name: CI
 
 on:
@@ -7,6 +8,9 @@ on:
     branches: ["**"]
   pull_request:
   workflow_dispatch:
+
+permissions:
+  contents: read
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -25,7 +29,7 @@ jobs:
             os: windows-latest
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
@@ -36,34 +40,50 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
 
       - name: UI tests (helpers + static security checks)
         run: npm test
 
-      - name: Rust tests (engine, file safety, batch pipeline, security config)
+      - name: Rust tests (engine, color accuracy, file safety, batch pipeline, security config)
         run: cargo test --workspace --locked
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets --locked -- -D clippy::correctness -D clippy::suspicious
 
-  audit:
-    name: Dependency audit
+  dependencies:
+    name: Dependencies (vulnerabilities + licenses)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
+
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories licenses bans sources
+          arguments: --workspace
+
+      - uses: dtolnay/rust-toolchain@stable
+
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-audit
-      - name: Check dependencies for known vulnerabilities (RustSec)
-        run: cargo audit
-      - uses: actions/setup-node@v4
+          tool: cargo-about
+
+      - name: Third-party license notices are up to date
+        run: |
+          python3 scripts/generate-licenses.py
+          git diff --exit-code -- THIRD-PARTY-LICENSES.md ui/licenses.html || {
+            echo "::error::Dependencies changed: run 'python3 scripts/generate-licenses.py' and commit the result."
+            exit 1
+          }
+
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
-      - name: Check npm dependencies
+
+      - name: npm dependencies
         run: npm audit --omit=optional --audit-level=high

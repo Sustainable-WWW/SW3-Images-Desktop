@@ -1,25 +1,106 @@
 //! Parallel batch compression. Independent of Tauri so the whole pipeline —
-//! queueing, parallel workers, cancellation, output writing — is unit tested.
+//! queueing, parallel workers, memory budgeting, cancellation, output
+//! writing — is unit tested.
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex, OnceLock};
 use std::time::Instant;
 use sw3_images::compress::{self, Format, Options};
 use sw3_images::files;
 
 /// Images compressed at the same time. A native app can use the machine:
 /// up to 5 in parallel, leaving one core free so the UI stays responsive.
-/// Each large photo can peak at a few hundred MB, so this also bounds RAM.
+/// Memory is bounded separately by the [`MemoryBudget`].
 pub fn worker_count() -> usize {
     let cores = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(4);
     cores.saturating_sub(1).clamp(1, 5)
 }
 
-#[derive(Debug, Clone, Deserialize)]
+const MB: u64 = 1024 * 1024;
+
+/// Peak memory of compressing one image, from measurements (decoding,
+/// encoder buffers, quality judging; large PNGs are the hungriest):
+/// roughly 130 bytes per pixel plus fixed overhead.
+pub fn memory_cost(pixels: u64) -> u64 {
+    64 * MB + pixels * 130
+}
+
+/// Caps the memory all workers may use at once, so five large photos in
+/// parallel can't exhaust RAM. Reservations are served strictly in order:
+/// a big image waits its turn instead of being starved by small ones.
+pub struct MemoryBudget {
+    total: u64,
+    state: Mutex<BudgetState>,
+    changed: Condvar,
+}
+
+struct BudgetState {
+    free: u64,
+    next_ticket: u64,
+    serving: u64,
+}
+
+pub struct Reservation<'a> {
+    budget: &'a MemoryBudget,
+    amount: u64,
+}
+
+impl MemoryBudget {
+    pub fn new(total: u64) -> MemoryBudget {
+        MemoryBudget {
+            total,
+            state: Mutex::new(BudgetState { free: total, next_ticket: 0, serving: 0 }),
+            changed: Condvar::new(),
+        }
+    }
+
+    /// 40% of physical RAM, between 1.5 GB and 16 GB.
+    pub fn for_this_machine() -> MemoryBudget {
+        let ram = {
+            use sysinfo::{MemoryRefreshKind, RefreshKind, System};
+            System::new_with_specifics(RefreshKind::nothing().with_memory(MemoryRefreshKind::nothing().with_ram()))
+                .total_memory()
+        };
+        let total = if ram == 0 { 3 * 1024 * MB } else { (ram / 10 * 4).clamp(1536 * MB, 16 * 1024 * MB) };
+        MemoryBudget::new(total)
+    }
+
+    /// Block until `cost` bytes are available (capped at the whole budget,
+    /// so an image bigger than the budget still runs — alone).
+    pub fn reserve(&self, cost: u64) -> Reservation<'_> {
+        let amount = cost.min(self.total);
+        let mut st = self.state.lock().unwrap();
+        let ticket = st.next_ticket;
+        st.next_ticket += 1;
+        while st.serving != ticket || st.free < amount {
+            st = self.changed.wait(st).unwrap();
+        }
+        st.free -= amount;
+        st.serving += 1;
+        drop(st);
+        self.changed.notify_all();
+        Reservation { budget: self, amount }
+    }
+}
+
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.budget.state.lock().unwrap().free += self.amount;
+        self.budget.changed.notify_all();
+    }
+}
+
+/// The app-wide budget shared by batches and single-file retries.
+pub fn global_budget() -> &'static MemoryBudget {
+    static BUDGET: OnceLock<MemoryBudget> = OnceLock::new();
+    BUDGET.get_or_init(MemoryBudget::for_this_machine)
+}
+
+#[derive(Debug, Clone)]
 pub struct Item {
     pub id: u32,
     pub path: PathBuf,
@@ -70,6 +151,7 @@ pub fn run(
     out_dir: &Path,
     workers: usize,
     cancel: &AtomicBool,
+    budget: &MemoryBudget,
     emit: &(dyn Fn(Event) + Sync),
 ) -> Summary {
     let t0 = Instant::now();
@@ -85,7 +167,7 @@ pub fn run(
                     emit(Event::Cancelled { id: item.id });
                     continue;
                 }
-                let ev = process(&item, &opts, out_dir, emit);
+                let ev = process(&item, &opts, out_dir, budget, emit);
                 {
                     let mut sm = summary.lock().unwrap();
                     match &ev {
@@ -109,7 +191,11 @@ pub fn run(
 
 /// Compress one file. Always returns `Done` or `Failed` — panics inside the
 /// codecs are caught so one bad image can never take down the batch.
-pub fn process(item: &Item, opts: &Options, out_dir: &Path, emit: &(dyn Fn(Event) + Sync)) -> Event {
+pub fn process(item: &Item, opts: &Options, out_dir: &Path, budget: &MemoryBudget, emit: &(dyn Fn(Event) + Sync)) -> Event {
+    // Reserve memory before starting; the header read is cheap. Unreadable
+    // files reserve the minimum and fail properly below.
+    let pixels = files::probe(&item.path).map(|i| i.width as u64 * i.height as u64).unwrap_or(0);
+    let _reservation = budget.reserve(memory_cost(pixels));
     emit(Event::Started { id: item.id });
     let id = item.id;
     let last = AtomicU32::new(0);
@@ -178,6 +264,41 @@ mod tests {
         log.lock().unwrap().push(e);
     }
 
+    fn budget() -> MemoryBudget {
+        MemoryBudget::new(8 * 1024 * MB)
+    }
+
+    #[test]
+    fn memory_budget_limits_concurrency_and_serves_in_order() {
+        let budget = MemoryBudget::new(100);
+        let in_use = std::sync::atomic::AtomicU64::new(0);
+        let peak = std::sync::atomic::AtomicU64::new(0);
+        let order = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            for (i, cost) in [60u64, 60, 10, 10, 250, 10].into_iter().enumerate() {
+                let (budget, in_use, peak, order) = (&budget, &in_use, &peak, &order);
+                s.spawn(move || {
+                    std::thread::sleep(std::time::Duration::from_millis(i as u64 * 5));
+                    let r = budget.reserve(cost);
+                    let now = in_use.fetch_add(r.amount, Ordering::SeqCst) + r.amount;
+                    peak.fetch_max(now, Ordering::SeqCst);
+                    order.lock().unwrap().push(i);
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    in_use.fetch_sub(r.amount, Ordering::SeqCst);
+                });
+            }
+        });
+        assert!(peak.load(Ordering::SeqCst) <= 100, "never more than the budget in use");
+        assert_eq!(order.into_inner().unwrap(), vec![0, 1, 2, 3, 4, 5], "first come, first served; oversize runs alone");
+    }
+
+    #[test]
+    fn memory_cost_scales_with_pixels() {
+        assert!(memory_cost(12_000_000) > 1_500 * MB && memory_cost(12_000_000) < 1_700 * MB);
+        assert!(memory_cost(0) > 0);
+        assert!(MemoryBudget::for_this_machine().total >= 1536 * MB);
+    }
+
     #[test]
     fn worker_count_is_between_one_and_five() {
         let n = worker_count();
@@ -217,7 +338,7 @@ mod tests {
             }
             push(&events, e);
         };
-        let summary = run(items, Options::default(), &out, 4, &AtomicBool::new(false), &emit);
+        let summary = run(items, Options::default(), &out, 4, &AtomicBool::new(false), &budget(), &emit);
 
         assert_eq!(summary.done, 9);
         assert_eq!(summary.failed, 0);
@@ -242,7 +363,7 @@ mod tests {
         write_jpeg(&p, 400, 300, 1);
         let opts = Options { max_width: Some(200), to_webp: true };
         let events = Log::default();
-        let summary = run(vec![Item { id: 1, path: p }], opts, &out, 2, &AtomicBool::new(false), &|e| push(&events, e));
+        let summary = run(vec![Item { id: 1, path: p }], opts, &out, 2, &AtomicBool::new(false), &budget(), &|e| push(&events, e));
         assert_eq!(summary.done, 1);
         let bytes = std::fs::read(out.join("IMG_1.webp")).unwrap();
         assert_eq!(Format::from_magic(&bytes), Some(Format::Webp));
@@ -275,7 +396,7 @@ mod tests {
             Item { id: 4, path: good },
         ];
         let events = Log::default();
-        let summary = run(items, Options::default(), &out, 2, &AtomicBool::new(false), &|e| push(&events, e));
+        let summary = run(items, Options::default(), &out, 2, &AtomicBool::new(false), &budget(), &|e| push(&events, e));
         assert_eq!((summary.done, summary.failed), (1, 3));
         let evs = events.lock().unwrap();
         for id in [1, 2, 3] {
@@ -305,7 +426,7 @@ mod tests {
             }
             push(&events, e);
         };
-        let summary = run(items, Options::default(), &out, 1, &cancel, &emit);
+        let summary = run(items, Options::default(), &out, 1, &cancel, &budget(), &emit);
         assert_eq!(summary.done, 1);
         assert_eq!(summary.cancelled, 5);
         std::fs::remove_dir_all(&src).unwrap();
@@ -318,7 +439,7 @@ mod tests {
         let p = dir.join("keep.jpg");
         write_jpeg(&p, 200, 120, 5);
         let original = std::fs::read(&p).unwrap();
-        let summary = run(vec![Item { id: 1, path: p.clone() }], Options::default(), &dir, 1, &AtomicBool::new(false), &|_| {});
+        let summary = run(vec![Item { id: 1, path: p.clone() }], Options::default(), &dir, 1, &AtomicBool::new(false), &budget(), &|_| {});
         assert_eq!(summary.done, 1);
         assert_eq!(std::fs::read(&p).unwrap(), original, "original must be byte-identical");
         assert!(dir.join("keep (2).jpg").exists());

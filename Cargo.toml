@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "sw3-images"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "SW3 Images engine — smart, visually-lossless image compression, resizing and WebP conversion"
 license = "MIT"
@@ -12,19 +12,22 @@ license = "MIT"
 [dependencies]
 serde = { version = "1", features = ["derive"] }
 
-# Image decoding / pixel handling
-image = "0.25"
+# Image decoding. Only the three formats we accept are compiled in: less code,
+# smaller binary, smaller attack surface.
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "webp", "rayon"] }
 rgb = "0.8"
 
-# Compression engines
-mozjpeg = "0.10"       # JPEG: trellis quantization, progressive scans
-imagequant = "4"       # PNG: high-quality palette quantization (pure Rust)
-lodepng = "3"          # PNG: indexed PNG writing
+# Encoders
+mozjpeg = "0.10"       # JPEG: trellis quantization, progressive scans (IJG/BSD-3/Zlib)
+quantizr = "1.4"       # PNG: palette quantization (MIT)
+lodepng = "3"          # PNG: indexed PNG writing (Zlib)
 oxipng = { version = "9", default-features = false, features = ["parallel", "zopfli"] }
-webp = "0.3"           # WebP: lossy + lossless via libwebp
+webp = { version = "0.3", default-features = false } # WebP via libwebp (BSD-3)
+miniz_oxide = "0.8"    # zlib for PNG iCCP chunks
 
-# Perceptual quality metric (SSIM in Lab color space)
-dssim-core = "3"
+# Perceptual quality (SSIMULACRA 2, BSD-2) and color-correct resizing
+ssimulacra2 = "0.5"
+fast_image_resize = "6"
 
 anyhow = "1"
 

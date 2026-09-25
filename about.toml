@@ -1,0 +1,18 @@
+# cargo-about: collects the license texts of every crate compiled into the
+# app. Used by scripts/generate-licenses.py.
+accepted = [
+    "MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause",
+    "ISC", "Zlib", "IJG", "Unicode-3.0", "MPL-2.0", "0BSD", "CC0-1.0", "Unlicense",
+]
+targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+ignore-build-dependencies = true
+ignore-dev-dependencies = true
+workarounds = ["ring", "rustls"]
+
+# quantizr ships an MIT LICENSE file but no SPDX license field.
+[quantizr.clarify]
+license = "MIT"
+[[quantizr.clarify.files]]
+path = "LICENSE"
+license = "MIT"
+checksum = "407b2d167f73ef78da1fcbfb6c2f1051f195b1984b9bfeeac0a39b34c198a7fe"

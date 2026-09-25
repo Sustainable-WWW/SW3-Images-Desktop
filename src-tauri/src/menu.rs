@@ -28,6 +28,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         .build(app)?;
     let website = MenuItemBuilder::with_id("link:sustainablewww", "Sustainable WWW Website").build(app)?;
     let source = MenuItemBuilder::with_id("link:github", "SW3 Images on GitHub").build(app)?;
+    let licenses = MenuItemBuilder::with_id("licenses", "Open-Source Licenses").build(app)?;
 
     let file = SubmenuBuilder::new(app, "File").item(&add).item(&folder).separator().close_window();
     let edit = SubmenuBuilder::new(app, "Edit").undo().redo().separator().cut().copy().paste().select_all().build()?;
@@ -47,7 +48,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
             .quit()
             .build()?;
         let window = SubmenuBuilder::new(app, "Window").minimize().maximize().fullscreen().separator().close_window().build()?;
-        let help = SubmenuBuilder::new(app, "Help").item(&website).item(&source).build()?;
+        let help = SubmenuBuilder::new(app, "Help").item(&website).item(&source).item(&licenses).build()?;
         Menu::with_items(app, &[&app_menu, &file.build()?, &edit, &window, &help])
     }
     #[cfg(not(target_os = "macos"))]
@@ -56,6 +57,7 @@ pub fn build<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<Menu<R>> {
         let help = SubmenuBuilder::new(app, "Help")
             .item(&website)
             .item(&source)
+            .item(&licenses)
             .separator()
             .item(&check)
             .separator()
@@ -81,6 +83,9 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
             "about" => {
                 let _ = open_about(app);
             }
+            "licenses" => {
+                let _ = open_licenses(app);
+            }
             "check_updates" | "add_images" => {
                 let _ = app.emit_to("main", "menu", id);
             }
@@ -99,6 +104,22 @@ pub fn install(app: &AppHandle) -> tauri::Result<()> {
     Ok(())
 }
 
+/// The bundled third-party license notices (static page; this window has no
+/// IPC permissions at all — it isn't listed in any capability).
+pub fn open_licenses<R: Runtime>(app: &AppHandle<R>) -> tauri::Result<()> {
+    if let Some(w) = app.get_webview_window("licenses") {
+        w.show()?;
+        return w.set_focus();
+    }
+    WebviewWindowBuilder::new(app, "licenses", WebviewUrl::App("licenses.html".into()))
+        .title("Open-Source Licenses")
+        .inner_size(720.0, 760.0)
+        .min_inner_size(480.0, 400.0)
+        .center()
+        .build()?;
+    Ok(())
+}
+
 pub fn open_about(app: &AppHandle) -> tauri::Result<()> {
     if let Some(w) = app.get_webview_window("about") {
         w.show()?;
@@ -106,7 +127,7 @@ pub fn open_about(app: &AppHandle) -> tauri::Result<()> {
     }
     let builder = WebviewWindowBuilder::new(app, "about", WebviewUrl::App("about.html".into()))
         .title("About SW3 Images")
-        .inner_size(460.0, 730.0)
+        .inner_size(460.0, 790.0)
         .resizable(false)
         .maximizable(false)
         .minimizable(false)

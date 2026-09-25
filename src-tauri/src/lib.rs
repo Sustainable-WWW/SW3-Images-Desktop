@@ -1,8 +1,9 @@
 //! SW3 Images desktop app: Tauri commands wrapping the compression engine.
 //!
-//! Security model: the webview only ever sees file *paths* it received from
-//! drag & drop or a native dialog, and can only ask Rust to read those as
-//! images. It cannot choose where files are written — the output folder is
+//! Security model: file paths never come from the webview. Images enter only
+//! through native drag & drop (handled here, in Rust) or a native file
+//! dialog; Rust keeps them in a library and the UI refers to them by id. The
+//! UI can't choose where files are written either — the output folder is
 //! only changeable through a native folder picker — and it has no access to
 //! the file system, shell, updater or notification APIs (see
 //! capabilities/default.json).
@@ -15,22 +16,52 @@ mod updates;
 use batch::{Event, Item};
 use serde::Serialize;
 use settings::{Settings, SettingsState};
+use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+use std::sync::{Arc, Mutex};
 use sw3_images::compress::Options;
 use sw3_images::files::{self, ImageInfo};
 use tauri::ipc::Channel;
 use tauri::window::{ProgressBarState, ProgressBarStatus};
-use tauri::{AppHandle, Manager, State};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
 
 #[derive(Default)]
-struct BatchState {
-    running: Arc<AtomicBool>,
+pub(crate) struct BatchState {
+    pub(crate) running: Arc<AtomicBool>,
     cancel: Arc<AtomicBool>,
+}
+
+/// Every image the user added this session, by id.
+#[derive(Default)]
+pub(crate) struct Library {
+    next_id: AtomicU32,
+    paths: Mutex<HashMap<u32, PathBuf>>,
+}
+
+impl Library {
+    fn add(&self, path: PathBuf) -> u32 {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
+        self.paths.lock().unwrap().insert(id, path);
+        id
+    }
+
+    fn items(&self, ids: &[u32]) -> Result<Vec<Item>, String> {
+        let paths = self.paths.lock().unwrap();
+        ids.iter()
+            .map(|id| paths.get(id).map(|p| Item { id: *id, path: p.clone() }).ok_or_else(|| "Unknown image".to_string()))
+            .collect()
+    }
+
+    fn forget(&self, ids: &[u32]) {
+        let mut paths = self.paths.lock().unwrap();
+        for id in ids {
+            paths.remove(id);
+        }
+    }
 }
 
 type CmdResult<T> = Result<T, String>;
@@ -68,9 +99,11 @@ fn app_info(app: AppHandle) -> CmdResult<AppInfo> {
     })
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct Scanned {
+    id: u32,
+    /// Display only (tooltips); never accepted back from the UI.
     path: String,
     name: String,
     format: sw3_images::compress::Format,
@@ -79,14 +112,15 @@ struct Scanned {
     size: u64,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ScanResult {
     images: Vec<Scanned>,
     skipped: usize,
 }
 
-/// Expand folders and probe every candidate in parallel (header reads only).
+/// Expand folders and probe every candidate in parallel (header reads only),
+/// registering each image in the library.
 fn scan(app: &AppHandle, paths: Vec<PathBuf>) -> ScanResult {
     let exclude = settings::output_dir(app).ok();
     let candidates = files::collect_images(&paths, exclude.as_deref());
@@ -100,28 +134,35 @@ fn scan(app: &AppHandle, paths: Vec<PathBuf>) -> ScanResult {
         handles.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
     });
     let total = probed.len();
+    let library = app.state::<Library>();
     let images: Vec<Scanned> = probed
         .into_iter()
         .flatten()
-        .filter_map(|i| {
-            Some(Scanned {
-                // Non-UTF-8 paths can't round-trip through JSON; skip them.
-                path: i.path.to_str()?.to_string(),
-                name: i.name,
-                format: i.format,
-                width: i.width,
-                height: i.height,
-                size: i.size,
-            })
+        .map(|i| Scanned {
+            path: i.path.display().to_string(),
+            id: library.add(i.path),
+            name: i.name,
+            format: i.format,
+            width: i.width,
+            height: i.height,
+            size: i.size,
         })
         .collect();
     ScanResult { skipped: total - images.len(), images }
 }
 
-#[tauri::command]
-async fn scan_paths(app: AppHandle, paths: Vec<String>) -> CmdResult<ScanResult> {
-    let paths = paths.into_iter().map(PathBuf::from).collect();
-    tauri::async_runtime::spawn_blocking(move || scan(&app, paths)).await.map_err(err)
+/// Files dropped on the window: scanned in Rust, results pushed to the UI.
+fn on_drop(app: &AppHandle, paths: Vec<PathBuf>) {
+    if app.state::<BatchState>().running.load(Ordering::SeqCst) {
+        let _ = app.emit_to("main", "drop-ignored", ());
+        return;
+    }
+    let _ = app.emit_to("main", "scan-started", ());
+    let app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let result = scan(&app, paths);
+        let _ = app.emit_to("main", "scanned", result);
+    });
 }
 
 #[tauri::command]
@@ -138,6 +179,12 @@ async fn pick_images(app: AppHandle) -> CmdResult<Option<ScanResult>> {
     })
     .await
     .map_err(err)
+}
+
+/// Drop images the UI no longer shows (removed tiles, Clear all).
+#[tauri::command]
+fn forget_images(library: State<'_, Library>, ids: Vec<u32>) {
+    library.forget(&ids);
 }
 
 /// The only way to change where files are written: a native folder picker.
@@ -175,6 +222,12 @@ fn open_link(app: AppHandle, name: String) -> CmdResult<()> {
     app.opener().open_url(url, None::<&str>).map_err(err)
 }
 
+/// Show the open-source licenses of everything bundled in the app.
+#[tauri::command]
+fn open_licenses(app: AppHandle) -> CmdResult<()> {
+    menu::open_licenses(&app).map_err(err)
+}
+
 fn validate(opts: &Options) -> CmdResult<()> {
     match opts.max_width {
         Some(w) if !(16..=8192).contains(&w) => Err("Max width must be between 16 and 8192 px".into()),
@@ -186,14 +239,16 @@ fn validate(opts: &Options) -> CmdResult<()> {
 fn start_batch(
     app: AppHandle,
     state: State<'_, BatchState>,
-    items: Vec<Item>,
+    library: State<'_, Library>,
+    ids: Vec<u32>,
     options: Options,
     on_event: Channel<Event>,
 ) -> CmdResult<usize> {
     validate(&options)?;
-    if items.is_empty() {
+    if ids.is_empty() {
         return Err("No images to compress".into());
     }
+    let items = library.items(&ids)?;
     if state.running.swap(true, Ordering::SeqCst) {
         return Err("A batch is already running".into());
     }
@@ -225,7 +280,7 @@ fn start_batch(
             }
             let _ = on_event.send(ev);
         };
-        let summary = batch::run(items, options, &out_dir, workers, &cancel, &emit);
+        let summary = batch::run(items, options, &out_dir, workers, &cancel, batch::global_budget(), &emit);
         set_bar(ProgressBarStatus::None, None);
         running.store(false, Ordering::SeqCst);
         if summary.done + summary.failed > 0 && !cancel.load(Ordering::SeqCst) {
@@ -243,14 +298,15 @@ fn stop_batch(state: State<'_, BatchState>) {
 
 /// Re-run a single failed image with the same options.
 #[tauri::command]
-async fn retry_file(app: AppHandle, item: Item, options: Options, on_event: Channel<Event>) -> CmdResult<()> {
+async fn retry_file(app: AppHandle, id: u32, options: Options, on_event: Channel<Event>) -> CmdResult<()> {
     validate(&options)?;
+    let item = app.state::<Library>().items(&[id])?.remove(0);
     let out_dir = settings::output_dir(&app).map_err(err)?;
     tauri::async_runtime::spawn_blocking(move || {
         let emit = |ev: Event| {
             let _ = on_event.send(ev);
         };
-        let ev = batch::process(&item, &options, &out_dir, &emit);
+        let ev = batch::process(&item, &options, &out_dir, batch::global_budget(), &emit);
         emit(ev);
     })
     .await
@@ -302,6 +358,7 @@ pub fn run() {
         .plugin(tauri_plugin_opener::init())
         .plugin(tauri_plugin_updater::Builder::new().build())
         .manage(BatchState::default())
+        .manage(Library::default())
         .manage(updates::PendingUpdate::default())
         .setup(|app| {
             let loaded = settings::load(app.handle());
@@ -312,16 +369,24 @@ pub fn run() {
             menu::install(app.handle())?;
             Ok(())
         })
+        .on_webview_event(|webview, event| {
+            if let WebviewEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+                if webview.label() == "main" && !paths.is_empty() {
+                    on_drop(webview.app_handle(), paths.clone());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
             app_info,
-            scan_paths,
             pick_images,
+            forget_images,
             pick_output_dir,
             open_output_dir,
             start_batch,
             stop_batch,
             retry_file,
             open_link,
+            open_licenses,
             updates::check_for_update,
             updates::install_update,
         ])
@@ -351,5 +416,19 @@ mod tests {
         assert!(validate(&Options { max_width: None, to_webp: false }).is_ok());
         assert!(validate(&Options { max_width: Some(0), to_webp: false }).is_err());
         assert!(validate(&Options { max_width: Some(100_000), to_webp: false }).is_err());
+    }
+
+    #[test]
+    fn the_ui_can_only_refer_to_images_the_user_added() {
+        let lib = Library::default();
+        let a = lib.add(PathBuf::from("/photos/a.jpg"));
+        let b = lib.add(PathBuf::from("/photos/b.jpg"));
+        assert_ne!(a, b);
+        let items = lib.items(&[b, a]).unwrap();
+        assert_eq!(items[0].path, PathBuf::from("/photos/b.jpg"));
+        assert!(lib.items(&[a, 999]).is_err(), "unknown ids are rejected, not guessed");
+        lib.forget(&[a]);
+        assert!(lib.items(&[a]).is_err());
+        assert!(lib.items(&[b]).is_ok());
     }
 }

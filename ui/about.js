@@ -7,6 +7,8 @@ document.querySelectorAll("[data-link]").forEach((btn) =>
   btn.addEventListener("click", () => invoke?.("open_link", { name: btn.dataset.link })),
 );
 
+document.getElementById("licenses").addEventListener("click", () => invoke?.("open_licenses"));
+
 document.addEventListener("contextmenu", (e) => {
   if (!e.target.closest("section p")) e.preventDefault();
 });

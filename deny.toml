@@ -1,0 +1,30 @@
+# cargo-deny: run in CI (`cargo deny check`). Fails the build if a dependency
+# has a known vulnerability or a license that doesn't allow redistributing
+# the app under MIT.
+
+[graph]
+targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+exclude-dev = true
+
+[advisories]
+# Unmaintained crates deep in Tauri's tree are reported, not fatal.
+unmaintained = "workspace"
+
+[licenses]
+allow = [
+    "MIT", "MIT-0", "Apache-2.0", "Apache-2.0 WITH LLVM-exception", "BSD-2-Clause", "BSD-3-Clause",
+    "ISC", "Zlib", "IJG", "Unicode-3.0", "MPL-2.0", "0BSD", "CC0-1.0", "Unlicense",
+]
+confidence-threshold = 0.9
+
+[[licenses.clarify]]
+crate = "quantizr"
+expression = "MIT"
+license-files = [{ path = "LICENSE", hash = 0x3334f258 }]
+
+[bans]
+multiple-versions = "allow"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"

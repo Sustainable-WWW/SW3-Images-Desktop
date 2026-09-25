@@ -1,31 +1,41 @@
 //! SW3 Images compression engine.
 //!
-//! Strategy: every candidate encoding is verified against the original with
-//! DSSIM (structural similarity in Lab color space). We binary-search for the
-//! smallest file whose perceptual distance stays below a "visually lossless"
-//! threshold, so output quality is guaranteed by measurement, not by a fixed
-//! quality knob. If nothing beats the original file, the original is returned.
+//! For every image the engine *measures* perceptual quality instead of
+//! trusting a fixed "quality 80" setting: each candidate encoding is compared
+//! with the original using SSIMULACRA 2 (see `quality.rs`), and the smallest
+//! file that reaches [`TARGET_SCORE`] wins. If no re-encoding beats the
+//! original file, the original bytes are returned untouched.
+//!
+//! Color is treated as part of quality:
+//! - the metric works in the XYB color space, so chroma loss counts;
+//! - embedded ICC color profiles (Display P3 phone photos, Adobe RGB...) are
+//!   carried into the output, so colors don't shift or desaturate;
+//! - JPEG chroma subsampling (4:2:0) is only used when it passes the metric,
+//!   otherwise full-resolution chroma (4:4:4) is used; WebP uses libwebp's
+//!   sharp (more accurate) RGB→YUV conversion;
+//! - resizing happens in linear light with premultiplied alpha.
 
+use crate::{color, meta, quality, resize};
 use anyhow::{anyhow, bail, Context, Result};
-use dssim_core::Dssim;
-use image::DynamicImage;
-use rgb::FromSlice;
+use image::metadata::Orientation;
+use image::{DynamicImage, ImageDecoder, Rgba, RgbaImage};
 
-/// Perceptual distance ceilings (DSSIM). Below ~0.001 differences are
-/// generally imperceptible at 1:1 viewing.
-const DSSIM_JPEG: f64 = 0.0012;
-const DSSIM_WEBP: f64 = 0.0012;
-/// Palette dithering reads as film-grain texture, slightly more forgiving.
-const DSSIM_PNG_LOSSY: f64 = 0.0015;
+/// SSIMULACRA 2 score every re-encoded image must reach. 80 is the metric's
+/// "impossible to distinguish from the original in a side-by-side comparison
+/// at 1:1" level (90 is reserved for flicker tests of pixel peepers).
+pub const TARGET_SCORE: f64 = 80.0;
 
-/// Images larger than this (long edge) are judged at display scale: quality is
-/// measured on a downscaled copy, the size a visitor actually sees on a web
-/// page. Artifacts that only appear when zooming past 100% no longer veto
-/// stronger compression — which is where the big byte savings live.
-const DISPLAY_EDGE: u32 = 1600;
+/// Images are judged at the size they are seen without zooming in: up to
+/// this long edge (the width of a Full HD screen). Smaller images are judged
+/// 1:1. Retina screens don't change this: they show more device pixels, but
+/// each is too small to see, so what matters is the size on screen.
+pub const DISPLAY_EDGE: u32 = 1920;
 
 /// Refuse absurd inputs before allocating pixel buffers.
-const MAX_PIXELS: u64 = 90_000_000; // 90 MP
+pub const MAX_PIXELS: u64 = 90_000_000; // 90 MP
+
+/// Upper bound for any single decoder allocation.
+const MAX_DECODE_BYTES: u64 = 1 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "lowercase")]
@@ -66,6 +76,14 @@ impl Format {
             Format::Webp => "image/webp",
         }
     }
+
+    fn image_format(self) -> image::ImageFormat {
+        match self {
+            Format::Jpeg => image::ImageFormat::Jpeg,
+            Format::Png => image::ImageFormat::Png,
+            Format::Webp => image::ImageFormat::WebP,
+        }
+    }
 }
 
 pub struct Compressed {
@@ -98,47 +116,123 @@ pub fn compress(input: &[u8], format: Format, max_width: Option<u32>, progress: 
 
 pub fn compress_with(input: &[u8], format: Format, opts: &Options, progress: Progress) -> Result<Compressed> {
     progress(0.02);
-    let mut img = decode(input, format)?;
-
-    // Optional pre-compression downscale (never upscales, keeps aspect ratio).
-    let mut resized = false;
-    if let Some(mw) = opts.max_width {
-        let mw = mw.clamp(16, 8192);
-        if img.width() > mw {
-            img = img.resize(mw, u32::MAX, image::imageops::FilterType::Lanczos3);
-            resized = true;
-        }
+    let mut decoder = open_decoder(input, format)?;
+    let (raw_w, raw_h) = decoder.dimensions();
+    let pixels = raw_w as u64 * raw_h as u64;
+    if pixels > MAX_PIXELS {
+        bail!("image is too large ({} megapixels; the maximum is {})", pixels / 1_000_000, MAX_PIXELS / 1_000_000);
     }
-    progress(0.10);
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    let (width, height) = oriented(raw_w, raw_h, orientation);
 
+    let resize_to = opts.max_width.and_then(|mw| resize::fit_width(width, height, mw.clamp(16, 8192)));
     let out_format = if opts.to_webp { Format::Webp } else { format };
     let converted = out_format != format;
-    // When the pixels were resized or the format changes, the original bytes
-    // are no longer a valid fallback — every path must produce a fresh encode.
-    let original = if resized || converted { None } else { Some(input) };
-    let result = match out_format {
-        Format::Jpeg => compress_jpeg(original, &img, progress)?,
-        Format::Png => compress_png(original, &img, progress)?,
-        Format::Webp => compress_webp(original, &img, progress)?,
+    let transformed = converted || resize_to.is_some();
+
+    // Re-encoding these would silently destroy something (the animation, or
+    // the colors of a print-oriented CMYK file), so they are never touched.
+    let protected = if format == Format::Png && meta::png_is_animated(input) {
+        Some("Animated PNG")
+    } else if format == Format::Webp && meta::webp_is_animated(input) {
+        Some("Animated WebP")
+    } else if format == Format::Jpeg && meta::jpeg_components(input) == Some(4) {
+        Some("CMYK JPEG")
+    } else {
+        None
+    };
+    if let Some(kind) = protected {
+        if transformed {
+            bail!("{kind} files can't be resized or converted without losing quality — this one was left out");
+        }
+        return Ok(Compressed {
+            data: input.to_vec(),
+            note: format!("{kind} — kept original"),
+            format,
+            width,
+            height,
+        });
+    }
+
+    let icc = decoder.icc_profile().ok().flatten().filter(|p| !p.is_empty());
+    let mut img = DynamicImage::from_decoder(decoder).context("could not decode image")?;
+    img.apply_orientation(orientation);
+    progress(0.08);
+
+    if let Some((w, h)) = resize_to {
+        img = resize::resize(&img, w, h)?;
+    }
+    progress(0.12);
+
+    // Color profiles worth keeping: anything that isn't plain sRGB (which
+    // browsers assume anyway), within a sane size.
+    let icc = icc.filter(|p| p.len() <= meta::MAX_ICC_BYTES && !meta::icc_is_srgb(p));
+    let p3 = icc.as_deref().is_some_and(meta::icc_is_display_p3);
+    let judge = Judge::new(&img, p3)?;
+    progress(0.20);
+
+    let original = if transformed { None } else { Some(input) };
+    let mut evals = 0u32;
+    let mut tick = || {
+        evals += 1;
+        progress(0.20 + 0.78 * (1.0 - 0.8f32.powi(evals as i32)));
+    };
+    let encoded = match out_format {
+        Format::Jpeg => encode_jpeg(&img, &judge, icc.as_deref(), original, &mut tick)?,
+        Format::Png => {
+            let chunks = if format == Format::Png { meta::png_color_chunks(input) } else { Vec::new() };
+            let gray_profile = icc.as_deref().is_some_and(|p| meta::icc_space(p) == meta::IccSpace::Gray);
+            encode_png(&img, &judge, &chunks, gray_profile, original, &mut tick)?
+        }
+        Format::Webp => encode_webp(&img, &judge, icc.as_deref(), &mut tick)?,
     };
     progress(1.0);
 
-    let (width, height) = (img.width(), img.height());
-    let done = |data: Vec<u8>, note: String| Compressed { data, note, format: out_format, width, height };
-
+    let (w, h) = (img.width(), img.height());
+    let done = |data: Vec<u8>, note: String| Compressed { data, note, format: out_format, width: w, height: h };
+    let resized_note = || resize_to.map(|(w, h)| format!("Resized to {w}×{h} · ")).unwrap_or_default();
     if converted {
-        let prefix = if resized { format!("Resized to {width}×{height} · ") } else { String::new() };
-        return Ok(done(result.data, format!("{prefix}Converted to {}", result.note)));
+        return Ok(done(encoded.data, format!("{}Converted to {}", resized_note(), encoded.note)));
     }
-    if resized {
-        // Dimensions changed on request; the original is no longer comparable.
-        return Ok(done(result.data, format!("Resized to {width}×{height} · {}", result.note)));
+    if resize_to.is_some() {
+        return Ok(done(encoded.data, format!("{}{}", resized_note(), encoded.note)));
     }
     // Never ship a file bigger than what the user already had.
-    if result.data.len() >= input.len() {
+    if encoded.data.len() >= input.len() {
         Ok(done(input.to_vec(), "Already optimal — kept original".into()))
     } else {
-        Ok(done(result.data, result.note))
+        Ok(done(encoded.data, encoded.note))
+    }
+}
+
+/// Perceptual score (SSIMULACRA 2, judged like the engine judges) of
+/// `candidate` against `original`. Both must have the same dimensions.
+pub fn perceptual_score(original: &DynamicImage, candidate: &DynamicImage) -> Result<f64> {
+    Judge::new(original, false)?.score(candidate)
+}
+
+/// Display dimensions (EXIF orientation applied) read from the file header
+/// only — no pixels are decoded. Works on a prefix of the file as long as it
+/// contains the headers.
+pub fn header_dimensions(bytes: &[u8], format: Format) -> Result<(u32, u32)> {
+    let mut decoder = open_decoder(bytes, format)?;
+    let (w, h) = decoder.dimensions();
+    let orientation = decoder.orientation().unwrap_or(Orientation::NoTransforms);
+    Ok(oriented(w, h, orientation))
+}
+
+fn open_decoder(input: &[u8], format: Format) -> Result<impl ImageDecoder + '_> {
+    let mut reader = image::ImageReader::with_format(std::io::Cursor::new(input), format.image_format());
+    let mut limits = image::Limits::default();
+    limits.max_alloc = Some(MAX_DECODE_BYTES);
+    reader.limits(limits);
+    reader.into_decoder().context("could not decode image")
+}
+
+fn oriented(w: u32, h: u32, o: Orientation) -> (u32, u32) {
+    match o {
+        Orientation::Rotate90 | Orientation::Rotate270 | Orientation::Rotate90FlipH | Orientation::Rotate270FlipH => (h, w),
+        _ => (w, h),
     }
 }
 
@@ -148,331 +242,258 @@ struct Encoded {
     note: String,
 }
 
-fn decode(input: &[u8], format: Format) -> Result<DynamicImage> {
-    let fmt = match format {
-        Format::Jpeg => image::ImageFormat::Jpeg,
-        Format::Png => image::ImageFormat::Png,
-        Format::Webp => image::ImageFormat::WebP,
-    };
-    let img = image::load_from_memory_with_format(input, fmt).context("could not decode image")?;
-    let px = (img.width() as u64) * (img.height() as u64);
-    if px > MAX_PIXELS {
-        bail!("image is too large ({} megapixels; max 90)", px / 1_000_000);
+// ---------------------------------------------------------------------------
+// Judging
+// ---------------------------------------------------------------------------
+
+/// Scores candidates against one original: the lower of the SSIMULACRA 2
+/// score (artifacts, detail, chroma structure) and the color score (casts
+/// and shifted colors, see `color.rs`). Transparent images are judged on
+/// both a white and a black background (the worse score counts), so errors
+/// in semi-transparent areas can't hide; invisible pixels don't matter.
+struct Judge {
+    width: u32,
+    height: u32,
+    judged: (u32, u32),
+    /// Nearest-neighbor upscale factor for images smaller than the metric's
+    /// minimum size (values are preserved exactly).
+    zoom: usize,
+    p3: bool,
+    refs: Vec<(Option<u8>, quality::Reference, color::ColorRef)>,
+}
+
+fn judge_dims(w: u32, h: u32) -> (u32, u32) {
+    let long = w.max(h);
+    if long <= DISPLAY_EDGE {
+        return (w, h);
     }
-    // Apply EXIF orientation for JPEGs so re-encoding (which strips EXIF)
-    // doesn't leave phone photos rotated sideways.
-    if format == Format::Jpeg {
-        if let Some(orient) = exif_orientation(input) {
-            return Ok(apply_orientation(img, orient));
+    let scale = DISPLAY_EDGE as f64 / long as f64;
+    (((w as f64 * scale).round() as u32).max(1), ((h as f64 * scale).round() as u32).max(1))
+}
+
+fn srgb_to_linear_lut() -> &'static [f32; 256] {
+    static LUT: std::sync::OnceLock<[f32; 256]> = std::sync::OnceLock::new();
+    LUT.get_or_init(|| {
+        let mut t = [0f32; 256];
+        for (i, v) in t.iter_mut().enumerate() {
+            let c = i as f64 / 255.0;
+            *v = (if c <= 0.04045 { c / 12.92 } else { ((c + 0.055) / 1.055).powf(2.4) }) as f32;
         }
+        t
+    })
+}
+
+impl Judge {
+    fn new(img: &DynamicImage, p3: bool) -> Result<Judge> {
+        let (width, height) = (img.width(), img.height());
+        let judged = judge_dims(width, height);
+        let zoom = quality::MIN_SIDE.div_ceil(judged.0.min(judged.1).max(1) as usize).max(1);
+        let backgrounds: Vec<Option<u8>> = if has_transparency(img) { vec![Some(255), Some(0)] } else { vec![None] };
+        let mut judge = Judge { width, height, judged, zoom, p3, refs: Vec::new() };
+        for bg in backgrounds {
+            let (lin, w, h) = judge.linear(img, bg)?;
+            let colors = color::ColorRef::new(&lin, w, h);
+            let reference = quality::Reference::new(lin, w, h).ok_or_else(|| anyhow!("could not build quality reference"))?;
+            judge.refs.push((bg, reference, colors));
+        }
+        Ok(judge)
     }
-    Ok(img)
+
+    /// Flatten onto the background, bring to judging size, and convert to
+    /// linear-light RGB with BT.709 primaries.
+    fn linear(&self, img: &DynamicImage, bg: Option<u8>) -> Result<(Vec<[f32; 3]>, usize, usize)> {
+        let flat = match bg {
+            None => img.to_rgb8(),
+            Some(b) => {
+                let rgba = img.to_rgba8();
+                image::RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+                    let p = rgba.get_pixel(x, y).0;
+                    let a = p[3] as u32;
+                    let mix = |c: u8| ((c as u32 * a + b as u32 * (255 - a) + 127) / 255) as u8;
+                    image::Rgb([mix(p[0]), mix(p[1]), mix(p[2])])
+                })
+            }
+        };
+        let flat = if self.judged != (self.width, self.height) {
+            resize::resize_for_judging(&DynamicImage::ImageRgb8(flat), self.judged.0, self.judged.1)?.to_rgb8()
+        } else {
+            flat
+        };
+        let lut = srgb_to_linear_lut();
+        let (fw, fh) = (flat.width() as usize, flat.height() as usize);
+        let (w, h) = (fw * self.zoom, fh * self.zoom);
+        let raw = flat.as_raw();
+        let mut out = Vec::with_capacity(w * h);
+        for y in 0..h {
+            let row = (y / self.zoom) * fw;
+            for x in 0..w {
+                let i = (row + x / self.zoom) * 3;
+                let (r, g, b) = (lut[raw[i] as usize], lut[raw[i + 1] as usize], lut[raw[i + 2] as usize]);
+                out.push(if self.p3 {
+                    // Display P3 → linear sRGB/BT.709 primaries (D65).
+                    [
+                        1.224_940_2 * r - 0.224_940_4 * g,
+                        -0.042_056_9 * r + 1.042_057_1 * g,
+                        -0.019_637_6 * r - 0.078_636_1 * g + 1.098_273_5 * b,
+                    ]
+                } else {
+                    [r, g, b]
+                });
+            }
+        }
+        Ok((out, w, h))
+    }
+
+    fn score(&self, candidate: &DynamicImage) -> Result<f64> {
+        if (candidate.width(), candidate.height()) != (self.width, self.height) {
+            bail!("candidate has the wrong dimensions");
+        }
+        let mut worst = f64::INFINITY;
+        for (bg, reference, colors) in &self.refs {
+            let (lin, _, _) = self.linear(candidate, *bg)?;
+            worst = worst.min(colors.score(&lin, TARGET_SCORE));
+            worst = worst.min(reference.score(lin).ok_or_else(|| anyhow!("could not score candidate"))?);
+        }
+        Ok(worst)
+    }
+
+    fn score_encoded(&self, bytes: &[u8], format: Format) -> Result<f64> {
+        let img = image::load_from_memory_with_format(bytes, format.image_format())
+            .context("could not decode a candidate encoding")?;
+        self.score(&img)
+    }
 }
 
 // ---------------------------------------------------------------------------
-// Perceptual metric
+// Quality search
 // ---------------------------------------------------------------------------
 
-struct Reference {
-    dssim: Dssim,
-    orig: dssim_core::DssimImage<f32>,
-    w: usize,
-    h: usize,
-    /// Judge-scale copy of the source when it had to be downscaled for
-    /// judging; None when the source already fits the judge size. Encoders
-    /// run their quality search on this small copy (cheap) and only encode
-    /// at full resolution a couple of times, near the quality the search
-    /// settles on.
-    probe_img: Option<DynamicImage>,
-    /// Probe encodes must be scored the way a full-resolution encode is: its
-    /// artifacts get averaged away by the downscale to judge size. This is
-    /// the reference downscaled by that same factor again — probe encodes are
-    /// shrunk onto it so their artifacts receive identical smoothing.
-    sim: Option<SimRef>,
+struct Eval {
+    q: u8,
+    score: f64,
+    bytes: Vec<u8>,
 }
 
-struct SimRef {
-    img: dssim_core::DssimImage<f32>,
-    w: usize,
-    h: usize,
-}
-
-impl Reference {
-    /// Dimensions an image is judged at: capped at DISPLAY_EDGE on the long
-    /// side, aspect ratio preserved.
-    fn judge_dims(img_w: u32, img_h: u32) -> (u32, u32) {
-        let long = img_w.max(img_h);
-        if long <= DISPLAY_EDGE {
-            return (img_w, img_h);
-        }
-        let scale = DISPLAY_EDGE as f64 / long as f64;
-        (
-            ((img_w as f64 * scale).round() as u32).max(1),
-            ((img_h as f64 * scale).round() as u32).max(1),
-        )
-    }
-
-    fn new(img: &DynamicImage) -> Result<Reference> {
-        let (jw, jh) = Self::judge_dims(img.width(), img.height());
-        let dssim = Dssim::new();
-        // The probe shortcut only pays off when the full image has at least
-        // twice the judge pixels; below that, searching at full resolution is
-        // both exact and no slower.
-        let worth_probing =
-            (img.width() as u64 * img.height() as u64) >= 2 * (jw as u64 * jh as u64);
-        let (rgba, probe_img, sim) = if (jw, jh) == (img.width(), img.height()) {
-            (img.to_rgba8(), None, None)
-        } else if !worth_probing {
-            let scaled = img.resize_exact(jw, jh, image::imageops::FilterType::Triangle);
-            (scaled.to_rgba8(), None, None)
-        } else {
-            let scaled = img.resize_exact(jw, jh, image::imageops::FilterType::Triangle);
-            // Same shrink factor as full -> judge, capped so the sim image
-            // stays large enough (~512px) for DSSIM to be meaningful.
-            let factor = (img.width().max(img.height()) as f64 / jw.max(jh) as f64).min(3.125);
-            let sw = ((jw as f64 / factor).round() as u32).max(1);
-            let sh = ((jh as f64 / factor).round() as u32).max(1);
-            let sim_rgba = scaled
-                .resize_exact(sw, sh, image::imageops::FilterType::Triangle)
-                .to_rgba8();
-            let sim_img = dssim
-                .create_image_rgba(sim_rgba.as_raw().as_rgba(), sw as usize, sh as usize)
-                .ok_or_else(|| anyhow!("could not build sim reference"))?;
-            (
-                scaled.to_rgba8(),
-                Some(scaled),
-                Some(SimRef { img: sim_img, w: sw as usize, h: sh as usize }),
-            )
-        };
-        let (w, h) = (jw as usize, jh as usize);
-        let orig = dssim
-            .create_image_rgba(rgba.as_raw().as_rgba(), w, h)
-            .ok_or_else(|| anyhow!("could not build reference image"))?;
-        Ok(Reference { dssim, orig, w, h, probe_img, sim })
-    }
-
-    /// Score a judge-scale probe encode as if it were a full-resolution
-    /// encode: shrink it by the full->judge factor before comparing.
-    fn sim_distance(&self, encoded: &[u8], fmt: image::ImageFormat) -> Result<f64> {
-        let sim = self.sim.as_ref().ok_or_else(|| anyhow!("no sim reference"))?;
-        let decoded = image::load_from_memory_with_format(encoded, fmt)?
-            .resize_exact(sim.w as u32, sim.h as u32, image::imageops::FilterType::Triangle)
-            .to_rgba8();
-        let cand = self
-            .dssim
-            .create_image_rgba(decoded.as_raw().as_rgba(), sim.w, sim.h)
-            .ok_or_else(|| anyhow!("could not build sim candidate"))?;
-        let (val, _) = self.dssim.compare(&sim.img, cand);
-        Ok(val.into())
-    }
-
-    /// DSSIM between the original and an encoded candidate (lower is better).
-    /// The candidate is downscaled to the same judging size as the reference.
-    fn distance(&self, encoded: &[u8], fmt: image::ImageFormat) -> Result<f64> {
-        let decoded = image::load_from_memory_with_format(encoded, fmt)?;
-        let img = if (decoded.width() as usize, decoded.height() as usize) == (self.w, self.h) {
-            decoded.to_rgba8()
-        } else {
-            decoded
-                .resize_exact(self.w as u32, self.h as u32, image::imageops::FilterType::Triangle)
-                .to_rgba8()
-        };
-        let cand = self
-            .dssim
-            .create_image_rgba(img.as_raw().as_rgba(), self.w, self.h)
-            .ok_or_else(|| anyhow!("could not build candidate image"))?;
-        let (val, _) = self.dssim.compare(&self.orig, cand);
-        Ok(val.into())
-    }
-}
-
-/// Binary-search the lowest quality whose perceptual distance stays under
-/// `threshold`. `encode` maps quality -> encoded bytes. Returns the winning
-/// bytes and quality, or None if even `hi` quality misses the threshold.
-fn quality_search(
-    lo0: u8,
-    hi0: u8,
-    threshold: f64,
-    progress: Progress,
-    progress_range: (f32, f32),
-    mut encode: impl FnMut(u8) -> Result<Vec<u8>>,
-    mut dist: impl FnMut(&[u8]) -> Result<f64>,
-) -> Result<Option<(Vec<u8>, u8)>> {
-    let steps = 8u32; // enough to bisect a ~35..95 range down to single steps
-    let mut step = 0u32;
-    let report = |s: u32| {
-        let (a, b) = progress_range;
-        progress(a + (b - a) * (s as f32 / (steps + 1) as f32));
-    };
-
-    // Make sure the top of the range is even achievable.
-    let hi_bytes = encode(hi0)?;
-    step += 1;
-    report(step);
-    if dist(&hi_bytes)? > threshold {
-        return Ok(None);
-    }
-
-    let (mut lo, mut hi) = (lo0, hi0);
-    let mut best = (hi_bytes, hi0);
-    while hi - lo > 1 && step < steps {
-        let q = (lo as u16 + hi as u16) as u8 / 2;
-        let bytes = encode(q)?;
-        step += 1;
-        report(step);
-        if dist(&bytes)? <= threshold {
-            best = (bytes, q);
-            hi = q;
-        } else {
-            lo = q;
-        }
-    }
-    Ok(Some(best))
-}
-
-/// A probe search found quality `q0` on the judge-scale image. Encode the
-/// full resolution near that quality with exact verification: step up until
-/// the perceptual gate passes, then probe downward to claw back any
-/// conservatism in the probe simulation. Typically costs 2-4 full encodes
-/// instead of the 8 a full-resolution search would need.
-#[allow(clippy::too_many_arguments)]
-fn finalize_full(
-    q0: u8,
+/// Find the lowest quality in `lo..=hi` whose encode reaches TARGET_SCORE.
+///
+/// Score rises roughly linearly with encoder quality, so instead of a fixed
+/// bisection the search steps by the estimated distance to the target and
+/// then interpolates between the best failing and passing qualities: usually
+/// 3-5 encodes. Returns None if even `hi` misses the target.
+fn search(
     lo: u8,
     hi: u8,
-    threshold: f64,
-    fmt: image::ImageFormat,
-    reference: &Reference,
-    progress: Progress,
-    progress_range: (f32, f32),
+    start: u8,
     mut encode: impl FnMut(u8) -> Result<Vec<u8>>,
-) -> Result<Option<(Vec<u8>, u8)>> {
-    let mut attempts = 0u32;
-    let mut report = || {
-        attempts += 1;
-        let (a, b) = progress_range;
-        progress(a + (b - a) * (attempts as f32 / 6.0));
-    };
-
-    // Find a passing quality at or above the probe's estimate.
-    let mut q = q0;
-    let mut passing: Option<(Vec<u8>, u8)> = None;
-    for _ in 0u32..4 {
+    mut score: impl FnMut(&[u8]) -> Result<f64>,
+    tick: &mut dyn FnMut(),
+) -> Result<Option<Eval>> {
+    const SLOPE: f64 = 0.5; // typical score gain per quality step
+    let mut pass: Option<Eval> = None;
+    let mut fail: Option<(u8, f64)> = None;
+    let mut q = start.clamp(lo, hi);
+    for _ in 0..8 {
         let bytes = encode(q)?;
-        report();
-        if reference.distance(&bytes, fmt)? <= threshold {
-            passing = Some((bytes, q));
+        let s = score(&bytes)?;
+        tick();
+        if s >= TARGET_SCORE {
+            if pass.as_ref().is_none_or(|p| q < p.q) {
+                pass = Some(Eval { q, score: s, bytes });
+            }
+        } else if fail.is_none_or(|(fq, _)| q > fq) {
+            fail = Some((q, s));
+        }
+        let next = match (&pass, fail) {
+            (Some(p), Some((fq, fs))) => {
+                if p.q <= fq.saturating_add(1) {
+                    break;
+                }
+                let est = fq as f64 + (TARGET_SCORE - fs) * (p.q - fq) as f64 / (p.score - fs).max(1e-6);
+                (est.ceil() as i64).clamp(fq as i64 + 1, p.q as i64 - 1) as u8
+            }
+            (Some(p), None) => {
+                if p.q <= lo {
+                    break;
+                }
+                let step = ((p.score - TARGET_SCORE) / SLOPE).floor().max(1.0) as i64;
+                (p.q as i64 - step).max(lo as i64) as u8
+            }
+            (None, Some((fq, fs))) => {
+                if fq >= hi {
+                    break;
+                }
+                let step = ((TARGET_SCORE - fs) / SLOPE).ceil().max(1.0) as i64;
+                (fq as i64 + step).min(hi as i64) as u8
+            }
+            (None, None) => unreachable!("every evaluation either passes or fails"),
+        };
+        if next == q {
             break;
         }
-        if q >= hi {
-            break;
-        }
-        q = (q + 3).min(hi);
+        q = next;
     }
-    let Some((mut best_bytes, mut best_q)) = passing else {
-        return Ok(None);
-    };
-
-    // Probe downward: the sim may have been slightly pessimistic.
-    for _ in 0u32..2 {
-        if best_q < lo.saturating_add(4) {
-            break;
-        }
-        let q_down = best_q - 4;
-        let bytes = encode(q_down)?;
-        report();
-        if reference.distance(&bytes, fmt)? <= threshold {
-            best_bytes = bytes;
-            best_q = q_down;
-        } else {
-            break;
-        }
-    }
-    Ok(Some((best_bytes, best_q)))
+    Ok(pass)
 }
 
 // ---------------------------------------------------------------------------
 // JPEG — mozjpeg with trellis quantization + progressive scans
 // ---------------------------------------------------------------------------
 
-struct Pixels {
-    data: Vec<u8>,
-    w: usize,
-    h: usize,
-}
-
-fn jpeg_pixels(img: &DynamicImage, gray: bool) -> Pixels {
+fn encode_jpeg(
+    img: &DynamicImage,
+    judge: &Judge,
+    icc: Option<&[u8]>,
+    original: Option<&[u8]>,
+    tick: &mut dyn FnMut(),
+) -> Result<Encoded> {
     let (w, h) = (img.width() as usize, img.height() as usize);
-    let data = if gray { img.to_luma8().into_raw() } else { img.to_rgb8().into_raw() };
-    Pixels { data, w, h }
-}
+    let space = icc.map(meta::icc_space);
+    let rgb_profile = icc.filter(|_| space == Some(meta::IccSpace::Rgb));
+    let gray_profile = icc.filter(|_| space == Some(meta::IccSpace::Gray));
+    // Single-channel JPEGs are ~1/3 smaller. Only when every pixel is gray
+    // and no RGB profile gives those grays a different meaning.
+    let try_gray = rgb_profile.is_none() && is_grayscale(img);
 
-fn compress_jpeg(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Encoded> {
-    let reference = Reference::new(img)?;
-
-    // Grayscale photos get a dedicated single-channel encode (~2/3 smaller).
-    let gray = is_grayscale(img);
-    let colorspace = if gray { mozjpeg::ColorSpace::JCS_GRAYSCALE } else { mozjpeg::ColorSpace::JCS_RGB };
-
-    let full = jpeg_pixels(img, gray);
-    // Search on the judge-scale copy when the image is large: ~all of the
-    // search cost drops with the pixel count, and only 1-2 full-resolution
-    // encodes remain.
-    let probe = reference.probe_img.as_ref().map(|p| jpeg_pixels(p, gray));
-    let search = probe.as_ref().unwrap_or(&full);
-
-    let run_pass = |force_444: bool,
-                        lo: u8,
-                        hi: u8,
-                        search_range: (f32, f32),
-                        final_range: (f32, f32)|
-     -> Result<Option<(Vec<u8>, u8)>> {
-        let fmt = image::ImageFormat::Jpeg;
-        let encode_search =
-            |q: u8| encode_mozjpeg(&search.data, search.w, search.h, colorspace, q as f32, force_444);
-        let found = if probe.is_some() {
-            quality_search(lo, hi, DSSIM_JPEG, progress, search_range, encode_search, |b| {
-                reference.sim_distance(b, fmt)
-            })?
-        } else {
-            quality_search(lo, hi, DSSIM_JPEG, progress, search_range, encode_search, |b| {
-                reference.distance(b, fmt)
-            })?
-        };
-        match found {
-            None => Ok(None),
-            Some((bytes, q)) if probe.is_none() => Ok(Some((bytes, q))),
-            Some((_, q)) => finalize_full(q, lo, hi, DSSIM_JPEG, fmt, &reference, progress, final_range, |q| {
-                encode_mozjpeg(&full.data, full.w, full.h, colorspace, q as f32, force_444)
-            }),
+    let mut attempt = |gray: bool| -> Result<Option<(Eval, &'static str)>> {
+        let px = if gray { img.to_luma8().into_raw() } else { img.to_rgb8().into_raw() };
+        let profile = if gray { gray_profile } else { rgb_profile };
+        let enc = |q: u8, full_chroma: bool| encode_mozjpeg(&px, w, h, gray, q, full_chroma, profile);
+        let first = search(40, 95, 80, |q| enc(q, false), |b| judge.score_encoded(b, Format::Jpeg), tick)?;
+        if gray {
+            return Ok(first.map(|e| (e, "grayscale")));
         }
+        // Fine colored detail (red text, logos, saturated edges) can defeat
+        // 4:2:0 chroma subsampling; full-resolution chroma then often gives
+        // a smaller file at a lower quality setting.
+        let second = if first.as_ref().is_none_or(|e| e.q >= 84) {
+            let start = first.as_ref().map_or(85, |e| e.q.saturating_sub(12).max(50));
+            search(50, 98, start, |q| enc(q, true), |b| judge.score_encoded(b, Format::Jpeg), tick)?
+        } else {
+            None
+        };
+        Ok(match (first, second) {
+            (Some(a), Some(b)) if b.bytes.len() < a.bytes.len() => Some((b, "4:4:4")),
+            (Some(a), _) => Some((a, "4:2:0")),
+            (None, Some(b)) => Some((b, "4:4:4")),
+            (None, None) => None,
+        })
     };
 
-    // Pass 1: standard 4:2:0 chroma subsampling (best compression).
-    if let Some((data, q)) = run_pass(false, 35, 94, (0.10, 0.72), (0.72, 0.92))? {
-        let mode = if gray { "grayscale" } else { "4:2:0" };
-        return Ok(Encoded {
-            data,
-            note: format!("JPEG q{q} {mode}, progressive, trellis-optimized"),
-        });
+    let mut found = if try_gray { attempt(true)? } else { None };
+    if found.is_none() {
+        found = attempt(false)?;
     }
-
-    // Pass 2: sharp colored edges (red text, logos) can defeat subsampling.
-    // Retry with full-resolution chroma before giving up.
-    match run_pass(true, 50, 97, (0.60, 0.85), (0.85, 0.95))? {
-        Some((data, q)) => Ok(Encoded {
-            data,
-            note: format!("JPEG q{q} 4:4:4 (fine color detail preserved)"),
+    match found {
+        Some((e, mode)) => Ok(Encoded {
+            data: e.bytes,
+            note: format!("JPEG q{} {mode}, progressive · quality score {:.0}", e.q, e.score),
         }),
-        None => match input {
-            Some(orig) => Ok(Encoded {
-                data: orig.to_vec(),
-                note: "Kept original (re-encoding would cost quality)".into(),
-            }),
-            // Resized: no original to fall back to — top quality encode.
+        None => match original {
+            Some(orig) => Ok(Encoded { data: orig.to_vec(), note: "Kept original (re-encoding would cost quality)".into() }),
+            // Resized or converted: there is no original to fall back to.
             None => Ok(Encoded {
-                data: encode_mozjpeg(&full.data, full.w, full.h, colorspace, 96.0, true)?,
-                note: "JPEG q96 4:4:4".into(),
+                data: encode_mozjpeg(&img.to_rgb8().into_raw(), w, h, false, 98, true, rgb_profile)?,
+                note: "JPEG q98 4:4:4".into(),
             }),
         },
     }
@@ -482,238 +503,277 @@ fn encode_mozjpeg(
     pixels: &[u8],
     w: usize,
     h: usize,
-    colorspace: mozjpeg::ColorSpace,
-    quality: f32,
-    force_444: bool,
+    gray: bool,
+    quality: u8,
+    full_chroma: bool,
+    icc: Option<&[u8]>,
 ) -> Result<Vec<u8>> {
     std::panic::catch_unwind(|| -> Result<Vec<u8>> {
-        let mut comp = mozjpeg::Compress::new(colorspace);
+        let space = if gray { mozjpeg::ColorSpace::JCS_GRAYSCALE } else { mozjpeg::ColorSpace::JCS_RGB };
+        let mut comp = mozjpeg::Compress::new(space);
         comp.set_size(w, h);
-        comp.set_quality(quality);
+        comp.set_quality(quality as f32);
         comp.set_progressive_mode();
-        if force_444 {
+        if full_chroma && !gray {
             comp.set_chroma_sampling_pixel_sizes((1, 1), (1, 1));
         }
         let mut started = comp.start_compress(Vec::new())?;
+        if let Some(profile) = icc {
+            write_jpeg_icc(&mut started, profile);
+        }
         started.write_scanlines(pixels)?;
         Ok(started.finish()?)
     })
     .map_err(|_| anyhow!("JPEG encoder panicked"))?
 }
 
+/// Embed an ICC profile as APP2 `ICC_PROFILE` markers. Chunk numbers are
+/// 1-based per the ICC spec; readers (libjpeg-turbo in browsers, zune-jpeg)
+/// discard profiles numbered from 0, which the `mozjpeg` crate's own helper
+/// writes — so it is not used.
+fn write_jpeg_icc<W>(started: &mut mozjpeg::compress::CompressStarted<W>, profile: &[u8]) {
+    const MAX_CHUNK: usize = 65_533 - 14; // marker payload limit minus header
+    let chunks: Vec<&[u8]> = profile.chunks(MAX_CHUNK).collect();
+    if chunks.is_empty() || chunks.len() > 255 {
+        return;
+    }
+    let total = chunks.len() as u8;
+    for (i, chunk) in chunks.iter().enumerate() {
+        let mut buf = Vec::with_capacity(chunk.len() + 14);
+        buf.extend_from_slice(b"ICC_PROFILE\0");
+        buf.push(i as u8 + 1);
+        buf.push(total);
+        buf.extend_from_slice(chunk);
+        started.write_marker(mozjpeg::Marker::APP(2), &buf);
+    }
+}
+
+/// Every pixel gray within JPEG decode noise. Exhaustive: a small colored
+/// logo on a black-and-white photo must not be turned gray.
 fn is_grayscale(img: &DynamicImage) -> bool {
-    use image::GenericImageView;
-    match img.color() {
-        image::ColorType::L8 | image::ColorType::L16 | image::ColorType::La8 | image::ColorType::La16 => {
-            return true
-        }
-        _ => {}
+    use image::ColorType::*;
+    if matches!(img.color(), L8 | L16 | La8 | La16) {
+        return true;
     }
-    // Sample a grid; tolerate tiny chroma noise from previous encodes.
-    let (w, h) = img.dimensions();
-    let step = ((w as u64 * h as u64 / 10_000).max(1) as f64).sqrt() as u32 + 1;
-    let mut checked = 0u32;
-    for y in (0..h).step_by(step as usize) {
-        for x in (0..w).step_by(step as usize) {
-            let p = img.get_pixel(x, y);
-            let (r, g, b) = (p[0] as i16, p[1] as i16, p[2] as i16);
-            if (r - g).abs() > 3 || (g - b).abs() > 3 || (r - b).abs() > 3 {
-                return false;
-            }
-            checked += 1;
-        }
-    }
-    checked > 0
+    img.to_rgb8().pixels().all(|p| {
+        let (r, g, b) = (p[0] as i16, p[1] as i16, p[2] as i16);
+        (r - g).abs() <= 3 && (g - b).abs() <= 3 && (r - b).abs() <= 3
+    })
 }
 
 // ---------------------------------------------------------------------------
-// PNG — lossy palette (imagequant) when invisible, else lossless (oxipng)
+// PNG — lossless (oxipng), 8-bit reduction, and palette quantization
 // ---------------------------------------------------------------------------
 
-fn compress_png(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Encoded> {
-    let reference = Reference::new(img)?;
-    let (w, h) = (img.width() as usize, img.height() as usize);
-    let rgba = img.to_rgba8();
+fn encode_png(
+    img: &DynamicImage,
+    judge: &Judge,
+    color_chunks: &meta::Chunks,
+    gray_profile: bool,
+    original: Option<&[u8]>,
+    tick: &mut dyn FnMut(),
+) -> Result<Encoded> {
+    let with_color = |png: Vec<u8>| meta::png_with_chunks(&png, color_chunks).unwrap_or(png);
+    let mut candidates: Vec<Encoded> = Vec::new();
 
-    // The lossless candidate starts from the original bytes — or, when the
-    // image was resized, from a fresh PNG encode of the resized pixels.
-    let lossless_src: Vec<u8> = match input {
+    // Lossless: the original bytes (or a fresh encode of the resized pixels)
+    // recompressed. Pixel-exact by construction.
+    let src = match original {
         Some(orig) => orig.to_vec(),
-        None => {
-            let mut buf = std::io::Cursor::new(Vec::new());
-            img.write_to(&mut buf, image::ImageFormat::Png)?;
-            buf.into_inner()
-        }
+        None => with_color(plain_png(img)?),
     };
+    let lossless = oxipng_optimize(&src).unwrap_or(src);
+    tick();
+    candidates.push(Encoded { data: lossless, note: "PNG lossless (oxipng)".into() });
 
-    // Candidate A: palette quantization at two dithering levels (heavy dither
-    // hides banding but inflates the deflate stream; light dither often wins
-    // on smooth gradients). Every candidate must pass the perceptual gate.
-    // imagequant refuses (Err) when it cannot hit its own quality floor,
-    // which pre-filters bad candidates.
-    progress(0.15);
-    let lossy = quantize_png(rgba.as_raw(), w, h)
-        .unwrap_or_default()
-        .into_iter()
-        .filter_map(|png| {
-            let optimized = oxipng_optimize(&png, false).unwrap_or(png);
-            match reference.distance(&optimized, image::ImageFormat::Png) {
-                Ok(d) if d <= DSSIM_PNG_LOSSY => Some(optimized),
-                _ => None,
-            }
-        })
-        .min_by_key(|png| png.len());
-    progress(0.60);
-
-    // Candidate B: lossless recompression.
-    let lossless = oxipng_optimize(&lossless_src, lossless_src.len() < 512 * 1024).ok();
-    progress(0.95);
-
-    match (lossy, lossless) {
-        (Some(a), Some(b)) if a.len() < b.len() => Ok(Encoded {
-            data: a,
-            note: "PNG palette-quantized (visually lossless) + oxipng".into(),
-        }),
-        (Some(a), None) => Ok(Encoded {
-            data: a,
-            note: "PNG palette-quantized (visually lossless) + oxipng".into(),
-        }),
-        (_, Some(b)) => Ok(Encoded {
-            data: b,
-            note: "PNG losslessly recompressed (oxipng)".into(),
-        }),
-        (None, None) => Ok(Encoded {
-            data: lossless_src,
-            note: "Kept original".into(),
-        }),
+    // 16 bits per channel is invisible on 8-bit (and most 10-bit) displays.
+    if img.color().bytes_per_pixel() / img.color().channel_count() > 1 {
+        let img8 = if has_transparency(img) { DynamicImage::ImageRgba8(img.to_rgba8()) } else { DynamicImage::ImageRgb8(img.to_rgb8()) };
+        let s = judge.score(&img8)?;
+        tick();
+        if s >= TARGET_SCORE {
+            let png = with_color(plain_png(&img8)?);
+            candidates.push(Encoded { data: oxipng_optimize(&png).unwrap_or(png), note: format!("PNG 8-bit · quality score {s:.0}") });
+        }
     }
+
+    // Palette quantization: often dramatically smaller for graphics and
+    // screenshots. Skipped when the image already fits a lossless palette
+    // (oxipng finds that exactly), and for gray-profiled images (a palette
+    // can't carry a gray ICC profile).
+    if !gray_profile && !has_at_most_colors(img, 256) {
+        if let Some((png, note)) = quantize_png(img, judge, tick)? {
+            let png = with_color(png);
+            candidates.push(Encoded { data: oxipng_optimize(&png).unwrap_or(png), note });
+        }
+    }
+
+    Ok(candidates.into_iter().min_by_key(|c| c.data.len()).expect("lossless candidate always exists"))
 }
 
-/// Palette-quantized PNG candidates at multiple dithering levels; the caller
-/// gates each one perceptually and keeps the smallest survivor.
-fn quantize_png(rgba: &[u8], w: usize, h: usize) -> Result<Vec<Vec<u8>>> {
-    let pixels: Vec<rgb::RGBA8> = rgba.as_rgba().to_vec();
-    let mut attr = imagequant::new();
-    attr.set_quality(60, 100)?;
-    let mut liq_img = attr.new_image(pixels, w, h, 0.0)?;
-    let mut res = attr.quantize(&mut liq_img)?;
+fn plain_png(img: &DynamicImage) -> Result<Vec<u8>> {
+    let mut buf = std::io::Cursor::new(Vec::new());
+    img.write_to(&mut buf, image::ImageFormat::Png)?;
+    Ok(buf.into_inner())
+}
 
-    let mut candidates = Vec::new();
-    for dither in [1.0f32, 0.35] {
-        if res.set_dithering_level(dither).is_err() {
+/// Palette candidates at several dithering levels (heavy dither hides
+/// banding in photos, none keeps flat graphics crisp); each must pass the
+/// perceptual gate, the smallest survivor wins.
+fn quantize_png(img: &DynamicImage, judge: &Judge, tick: &mut dyn FnMut()) -> Result<Option<(Vec<u8>, String)>> {
+    let rgba = img.to_rgba8();
+    let (w, h) = (rgba.width() as usize, rgba.height() as usize);
+    let qimg = quantizr::Image::new(rgba.as_raw(), w, h).map_err(|e| anyhow!("quantizer: {e:?}"))?;
+    let mut opts = quantizr::Options::default();
+    opts.set_max_colors(255).map_err(|e| anyhow!("quantizer: {e:?}"))?;
+    let mut result = quantizr::QuantizeResult::quantize(&qimg, &opts);
+
+    let mut best: Option<(Vec<u8>, String)> = None;
+    let mut indexes = vec![0u8; w * h];
+    for dither in [1.0f32, 0.5, 0.0] {
+        result.set_dithering_level(dither).map_err(|e| anyhow!("quantizer: {e:?}"))?;
+        result.remap_image(&qimg, &mut indexes).map_err(|e| anyhow!("quantizer: {e:?}"))?;
+        let pal = result.get_palette();
+        let entries: Vec<rgb::RGBA8> = pal.entries[..pal.count as usize].iter().map(|c| rgb::RGBA8::new(c.r, c.g, c.b, c.a)).collect();
+        let recon = RgbaImage::from_fn(w as u32, h as u32, |x, y| {
+            let c = entries[indexes[y as usize * w + x as usize] as usize];
+            Rgba([c.r, c.g, c.b, c.a])
+        });
+        let s = judge.score(&DynamicImage::ImageRgba8(recon))?;
+        tick();
+        if s < TARGET_SCORE {
             continue;
         }
-        let Ok((palette, indexed)) = res.remapped(&mut liq_img) else {
-            continue;
-        };
         let mut enc = lodepng::Encoder::new();
-        if enc.set_palette(&palette).is_err() {
-            continue;
-        }
-        if let Ok(png) = enc.encode(&indexed, w, h) {
-            candidates.push(png);
+        enc.set_palette(&entries)?;
+        let png = enc.encode(&indexes, w, h)?;
+        if best.as_ref().is_none_or(|(b, _)| png.len() < b.len()) {
+            best = Some((png, format!("PNG {} colors · quality score {s:.0}", entries.len())));
         }
     }
-    Ok(candidates)
+    Ok(best)
 }
 
-fn oxipng_optimize(png: &[u8], thorough: bool) -> Result<Vec<u8>> {
-    let mut opts = oxipng::Options::from_preset(if thorough { 4 } else { 2 });
+fn oxipng_optimize(png: &[u8]) -> Result<Vec<u8>> {
+    let mut opts = oxipng::Options::from_preset(if png.len() < 4 * 1024 * 1024 { 4 } else { 2 });
+    // Keep only chunks that affect how the image displays (color profile,
+    // gamma...), drop metadata.
     opts.strip = oxipng::StripChunks::Safe;
     opts.optimize_alpha = true;
-    // Zopfli squeezes a few more percent out of the deflate stream; only worth
-    // its (considerable) CPU cost on smaller files.
-    if png.len() < 256 * 1024 {
-        opts.deflate = oxipng::Deflaters::Zopfli {
-            iterations: std::num::NonZeroU8::new(15).unwrap(),
-        };
+    opts.timeout = Some(std::time::Duration::from_secs(60));
+    // Zopfli squeezes out a few more percent; only worth its CPU on small files.
+    if png.len() < 128 * 1024 {
+        opts.deflate = oxipng::Deflaters::Zopfli { iterations: std::num::NonZeroU8::new(15).unwrap() };
     }
     Ok(oxipng::optimize_from_memory(png, &opts)?)
 }
 
-// ---------------------------------------------------------------------------
-// WebP — lossy quality search, lossless candidate for graphics
-// ---------------------------------------------------------------------------
+fn has_at_most_colors(img: &DynamicImage, max: usize) -> bool {
+    let mut seen = std::collections::HashSet::with_capacity(max + 1);
+    for p in img.to_rgba8().pixels() {
+        if seen.insert(p.0) && seen.len() > max {
+            return false;
+        }
+    }
+    true
+}
 
-fn compress_webp(input: Option<&[u8]>, img: &DynamicImage, progress: Progress) -> Result<Encoded> {
-    let reference = Reference::new(img)?;
-    let (w, h) = (img.width(), img.height());
-    let rgba = img.to_rgba8();
-
-    // Search on the judge-scale copy when the image is large (see JPEG path).
-    let probe_rgba = reference.probe_img.as_ref().map(|p| p.to_rgba8());
-    let (search_rgba, sw, sh) = match &probe_rgba {
-        Some(p) => (p, p.width(), p.height()),
-        None => (&rgba, w, h),
-    };
-
-    let fmt = image::ImageFormat::WebP;
-    let encode_search = |q: u8| encode_webp_lossy(search_rgba.as_raw(), sw, sh, q as f32);
-    let found = if probe_rgba.is_some() {
-        quality_search(35, 95, DSSIM_WEBP, progress, (0.10, 0.70), encode_search, |b| {
-            reference.sim_distance(b, fmt)
-        })?
-    } else {
-        quality_search(35, 95, DSSIM_WEBP, progress, (0.10, 0.70), encode_search, |b| {
-            reference.distance(b, fmt)
-        })?
-    };
-    let found = match found {
-        Some((bytes, q)) if probe_rgba.is_none() => Some((bytes, q)),
-        Some((_, q)) => finalize_full(q, 35, 95, DSSIM_WEBP, fmt, &reference, progress, (0.70, 0.82), |q| {
-            encode_webp_lossy(rgba.as_raw(), w, h, q as f32)
-        })?,
-        None => None,
-    };
-
-    // Graphics with few colors often compress dramatically better lossless.
-    progress(0.85);
-    let lossless = if likely_graphic(&rgba) {
-        Some(webp::Encoder::from_rgba(rgba.as_raw(), w, h).encode_lossless().to_vec())
-    } else {
-        None
-    };
-
-    let lossy_note = |q: u8| format!("WebP q{q} (perceptually tuned)");
-    match (found, lossless) {
-        (Some((a, _)), Some(b)) if b.len() < a.len() => Ok(Encoded {
-            data: b,
-            note: "WebP lossless (graphic content)".into(),
-        }),
-        (Some((a, q)), _) => Ok(Encoded { data: a, note: lossy_note(q) }),
-        (None, Some(b)) => Ok(Encoded {
-            data: b,
-            note: "WebP lossless (quality could not be preserved lossily)".into(),
-        }),
-        (None, None) => match input {
-            Some(orig) => Ok(Encoded {
-                data: orig.to_vec(),
-                note: "Kept original".into(),
-            }),
-            // Resized: no original to fall back to — top quality encode.
-            None => Ok(Encoded {
-                data: encode_webp_lossy(rgba.as_raw(), w, h, 95.0)?,
-                note: "WebP q95".into(),
-            }),
-        },
+fn has_transparency(img: &DynamicImage) -> bool {
+    match img {
+        DynamicImage::ImageRgba8(b) => b.pixels().any(|p| p[3] < 255),
+        DynamicImage::ImageLumaA8(b) => b.pixels().any(|p| p[1] < 255),
+        DynamicImage::ImageRgba16(b) => b.pixels().any(|p| p[3] < u16::MAX),
+        DynamicImage::ImageLumaA16(b) => b.pixels().any(|p| p[1] < u16::MAX),
+        other if other.color().has_alpha() => other.to_rgba8().pixels().any(|p| p[3] < 255),
+        _ => false,
     }
 }
 
-/// Lossy WebP at maximum rate-distortion effort (method 6): noticeably
-/// smaller than the default method 4 at identical quality, at the cost of
-/// encode time — a good trade for a compress-once, serve-forever tool.
-fn encode_webp_lossy(rgba: &[u8], w: u32, h: u32, quality: f32) -> Result<Vec<u8>> {
-    let mut config = webp::WebPConfig::new().map_err(|_| anyhow!("webp config init failed"))?;
-    config.quality = quality;
-    config.method = 6;
-    let mem = webp::Encoder::from_rgba(rgba, w, h)
-        .encode_advanced(&config)
-        .map_err(|e| anyhow!("webp encode failed: {e:?}"))?;
-    Ok(mem.to_vec())
+// ---------------------------------------------------------------------------
+// WebP — lossy quality search, near-lossless and lossless for graphics
+// ---------------------------------------------------------------------------
+
+fn encode_webp(img: &DynamicImage, judge: &Judge, icc: Option<&[u8]>, tick: &mut dyn FnMut()) -> Result<Encoded> {
+    let (w, h) = (img.width(), img.height());
+    let alpha = has_transparency(img);
+    let px = if alpha { img.to_rgba8().into_raw() } else { img.to_rgb8().into_raw() };
+    let layout = if alpha { webp::PixelLayout::Rgba } else { webp::PixelLayout::Rgb };
+    let encoder = webp::Encoder::new(&px, layout, w, h);
+    let pixels = w as u64 * h as u64;
+    // Lossless effort (libwebp's quality doubles as effort in lossless
+    // mode): maximum on small images, cheaper presets as they grow.
+    let (lossless_quality, lossless_method) = match pixels {
+        0..=1_000_000 => (100.0, 6),
+        1_000_001..=3_000_000 => (90.0, 5),
+        _ => (75.0, 4),
+    };
+
+    let run = |lossless: bool, quality: f32, near_lossless: i32, method: i32| -> Result<Vec<u8>> {
+        let mut c = webp::WebPConfig::new().map_err(|_| anyhow!("webp config init failed"))?;
+        c.quality = quality;
+        c.method = method;
+        c.alpha_quality = 100;
+        if lossless {
+            c.lossless = 1;
+            c.near_lossless = near_lossless;
+        } else {
+            // Accurate RGB→YUV conversion: much less color bleeding and
+            // desaturation on saturated edges than libwebp's default.
+            c.use_sharp_yuv = 1;
+        }
+        let mem = encoder.encode_advanced(&c).map_err(|e| anyhow!("webp encode failed: {e:?}"))?;
+        Ok(mem.to_vec())
+    };
+    let score = |b: &[u8]| judge.score_encoded(b, Format::Webp);
+
+    let mut candidates: Vec<Encoded> = Vec::new();
+    // Search at a mid effort level (~3x faster), then spend maximum effort
+    // once at the chosen quality: usually smaller at the same score. It is
+    // re-verified like every other candidate.
+    let mut lossy = search(40, 100, 82, |q| run(false, q as f32, 100, 4), score, tick)?;
+    if let Some(e) = &lossy {
+        let data = run(false, e.q as f32, 100, 6)?;
+        if data.len() < e.bytes.len() {
+            let s = score(&data)?;
+            tick();
+            if s >= TARGET_SCORE {
+                lossy = Some(Eval { q: e.q, score: s, bytes: data });
+            }
+        }
+    }
+    let graphic = likely_graphic(img);
+    let explore = graphic || lossy.as_ref().is_none_or(|e| e.q >= 92);
+    if let Some(e) = lossy {
+        candidates.push(Encoded { data: e.bytes, note: format!("WebP q{} · quality score {:.0}", e.q, e.score) });
+    }
+    if explore {
+        // Near-lossless keeps full color resolution (no 4:2:0) — the fix
+        // for content lossy WebP can't carry, like fine colored text.
+        for level in [60, 80] {
+            let data = run(true, lossless_quality, level, lossless_method)?;
+            let s = score(&data)?;
+            tick();
+            if s >= TARGET_SCORE {
+                candidates.push(Encoded { data, note: format!("WebP near-lossless · quality score {s:.0}") });
+                break;
+            }
+        }
+        if graphic || candidates.is_empty() {
+            let data = run(true, lossless_quality, 100, lossless_method)?;
+            tick();
+            candidates.push(Encoded { data, note: "WebP lossless".into() });
+        }
+    }
+    let mut best = candidates.into_iter().min_by_key(|c| c.data.len()).expect("a WebP candidate always exists");
+    if let Some(profile) = icc.filter(|p| meta::icc_space(p) == meta::IccSpace::Rgb) {
+        best.data = meta::webp_with_icc(&best.data, profile).ok_or_else(|| anyhow!("could not embed color profile"))?;
+    }
+    Ok(best)
 }
 
 /// Heuristic: sampled unique-color count is low => logo/screenshot/graphic.
-fn likely_graphic(rgba: &image::RgbaImage) -> bool {
+fn likely_graphic(img: &DynamicImage) -> bool {
+    let rgba = img.to_rgba8();
     let mut colors = std::collections::HashSet::new();
     let step = (rgba.pixels().len() / 20_000).max(1);
     for p in rgba.pixels().step_by(step) {
@@ -726,93 +786,14 @@ fn likely_graphic(rgba: &image::RgbaImage) -> bool {
 }
 
 // ---------------------------------------------------------------------------
-// EXIF orientation (JPEG)
-// ---------------------------------------------------------------------------
-
-/// Minimal EXIF walk: find the Orientation tag (0x0112) in IFD0. Works on a
-/// truncated prefix of the file too, and never panics on malformed input.
-pub(crate) fn exif_orientation(jpeg: &[u8]) -> Option<u16> {
-    // Locate APP1 "Exif" segment.
-    let mut i = 2usize;
-    while i + 4 <= jpeg.len() {
-        if jpeg[i] != 0xFF {
-            return None;
-        }
-        let marker = jpeg[i + 1];
-        if marker == 0xDA {
-            return None; // start of scan, no EXIF found
-        }
-        let len = u16::from_be_bytes([jpeg[i + 2], jpeg[i + 3]]) as usize;
-        if len < 2 {
-            return None; // corrupt segment length
-        }
-        if marker == 0xE1 && len >= 8 && i + 10 <= jpeg.len() && &jpeg[i + 4..i + 10] == b"Exif\0\0" {
-            let end = (i + 2 + len).min(jpeg.len());
-            return parse_tiff_orientation(&jpeg[i + 10..end]);
-        }
-        i += 2 + len;
-    }
-    None
-}
-
-fn parse_tiff_orientation(tiff: &[u8]) -> Option<u16> {
-    if tiff.len() < 14 {
-        return None;
-    }
-    let le = match &tiff[0..2] {
-        b"II" => true,
-        b"MM" => false,
-        _ => return None,
-    };
-    let rd16 = |b: &[u8]| -> u16 {
-        if le { u16::from_le_bytes([b[0], b[1]]) } else { u16::from_be_bytes([b[0], b[1]]) }
-    };
-    let rd32 = |b: &[u8]| -> u32 {
-        if le {
-            u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-        } else {
-            u32::from_be_bytes([b[0], b[1], b[2], b[3]])
-        }
-    };
-    let ifd = rd32(&tiff[4..8]) as usize;
-    if ifd + 2 > tiff.len() {
-        return None;
-    }
-    let count = rd16(&tiff[ifd..ifd + 2]) as usize;
-    for n in 0..count {
-        let e = ifd + 2 + n * 12;
-        if e + 12 > tiff.len() {
-            return None;
-        }
-        if rd16(&tiff[e..e + 2]) == 0x0112 {
-            let v = rd16(&tiff[e + 8..e + 10]);
-            return (1..=8).contains(&v).then_some(v);
-        }
-    }
-    None
-}
-
-fn apply_orientation(img: DynamicImage, orientation: u16) -> DynamicImage {
-    match orientation {
-        2 => img.fliph(),
-        3 => img.rotate180(),
-        4 => img.flipv(),
-        5 => img.rotate90().fliph(),
-        6 => img.rotate90(),
-        7 => img.rotate270().fliph(),
-        8 => img.rotate270(),
-        _ => img,
-    }
-}
-
-// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use image::{ImageBuffer, Rgb, Rgba};
+    use crate::meta::tests::make_profile;
+    use image::{ImageBuffer, Rgb};
 
     /// Deterministic photo-like image: gradients, shapes, mild noise.
     fn photo(w: u32, h: u32) -> DynamicImage {
@@ -823,7 +804,7 @@ mod tests {
             seed ^= seed << 5;
             seed
         };
-        let img = ImageBuffer::from_fn(w, h, |x, y| {
+        DynamicImage::ImageRgb8(ImageBuffer::from_fn(w, h, |x, y| {
             let fx = x as f32 / w as f32;
             let fy = y as f32 / h as f32;
             let base_r = 60.0 + 140.0 * fx + 20.0 * (fy * 12.0).sin();
@@ -836,8 +817,7 @@ mod tests {
                 (base_g + n).clamp(0.0, 255.0) as u8,
                 (base_b + n - circle).clamp(0.0, 255.0) as u8,
             ])
-        });
-        DynamicImage::ImageRgb8(img)
+        }))
     }
 
     fn encode(img: &DynamicImage, fmt: image::ImageFormat) -> Vec<u8> {
@@ -846,7 +826,27 @@ mod tests {
         buf.into_inner()
     }
 
+    fn jpeg_with_icc(img: &DynamicImage, icc: &[u8]) -> Vec<u8> {
+        let rgb = img.to_rgb8();
+        encode_mozjpeg(rgb.as_raw(), rgb.width() as usize, rgb.height() as usize, false, 95, true, Some(icc)).unwrap()
+    }
+
+    fn icc_of(bytes: &[u8]) -> Option<Vec<u8>> {
+        let fmt = Format::from_magic(bytes).unwrap();
+        open_decoder(bytes, fmt).unwrap().icc_profile().unwrap()
+    }
+
+    fn decode(bytes: &[u8]) -> DynamicImage {
+        image::load_from_memory(bytes).unwrap()
+    }
+
     const NOOP: Progress = &|_| {};
+
+    /// The core promise, re-verified from scratch on the output.
+    fn assert_meets_target(original: &DynamicImage, out: &[u8]) {
+        let s = perceptual_score(original, &decode(out)).unwrap();
+        assert!(s >= TARGET_SCORE - 1e-9, "score {s} below target");
+    }
 
     #[test]
     fn magic_sniffing() {
@@ -859,30 +859,50 @@ mod tests {
     }
 
     #[test]
-    fn jpeg_photo_shrinks_and_stays_visually_lossless() {
+    fn jpeg_photo_shrinks_and_meets_the_quality_target() {
         let img = photo(320, 240);
-        let input = encode(&img, image::ImageFormat::Jpeg); // image crate q~75 baseline
+        let input = encode_mozjpeg(img.to_rgb8().as_raw(), 320, 240, false, 97, true, None).unwrap();
         let out = compress(&input, Format::Jpeg, None, NOOP).unwrap();
         assert!(out.data.len() < input.len(), "expected shrink, got {} -> {}", input.len(), out.data.len());
-
-        // Quality guarantee: distance from the *input decode* stays tiny.
-        let decoded_in = image::load_from_memory(&input).unwrap();
-        let reference = Reference::new(&decoded_in).unwrap();
-        let d = reference.distance(&out.data, image::ImageFormat::Jpeg).unwrap();
-        assert!(d <= DSSIM_JPEG * 1.05, "dssim {d} exceeds threshold");
-
-        let decoded_out = image::load_from_memory(&out.data).unwrap();
-        assert_eq!((decoded_out.width(), decoded_out.height()), (320, 240));
+        assert_meets_target(&decode(&input), &out.data);
+        assert_eq!((out.width, out.height), (320, 240));
     }
 
     #[test]
     fn grayscale_jpeg_uses_single_channel() {
-        let gray = DynamicImage::ImageLuma8(ImageBuffer::from_fn(200, 150, |x, y| {
-            image::Luma([((x * 255 / 200 + y) % 255) as u8])
-        }));
-        let input = encode(&gray.to_rgb8().into(), image::ImageFormat::Jpeg);
+        let gray = DynamicImage::ImageLuma8(ImageBuffer::from_fn(200, 150, |x, y| image::Luma([((x * 255 / 200 + y) % 255) as u8])));
+        let input = encode(&DynamicImage::ImageRgb8(gray.to_rgb8()), image::ImageFormat::Jpeg);
         let out = compress(&input, Format::Jpeg, None, NOOP).unwrap();
         assert!(out.note.contains("grayscale") || out.note.contains("original"), "note: {}", out.note);
+    }
+
+    #[test]
+    fn a_small_colored_detail_keeps_a_photo_in_color() {
+        // Black-and-white photo with one small red mark: must stay color.
+        let mut img = DynamicImage::ImageLuma8(ImageBuffer::from_fn(300, 200, |x, y| image::Luma([((x + y) % 256) as u8]))).to_rgb8();
+        for y in 97..103 {
+            for x in 147..153 {
+                img.put_pixel(x, y, Rgb([220, 20, 30]));
+            }
+        }
+        let img = DynamicImage::ImageRgb8(img);
+        assert!(!is_grayscale(&img));
+        let out = compress(&encode(&img, image::ImageFormat::Png), Format::Png, None, NOOP).unwrap();
+        let p = decode(&out.data).to_rgb8().get_pixel(150, 100).0;
+        assert!(p[0] > 150 && p[1] < 80, "red mark must survive, got {p:?}");
+    }
+
+    #[test]
+    fn fine_colored_detail_gets_full_resolution_chroma() {
+        // Thin saturated strokes on a contrasting background: 4:2:0 can't
+        // reach the target, 4:4:4 can.
+        let img = DynamicImage::ImageRgb8(ImageBuffer::from_fn(240, 160, |x, y| {
+            if (x / 2) % 3 == 0 && (y / 8) % 2 == 0 { Rgb([230, 20, 30]) } else { Rgb([30, 60, 200]) }
+        }));
+        let input = encode_mozjpeg(img.to_rgb8().as_raw(), 240, 160, false, 99, true, None).unwrap();
+        let out = compress(&input, Format::Jpeg, None, NOOP).unwrap();
+        assert!(!out.note.contains("4:2:0"), "note: {}", out.note);
+        assert_meets_target(&decode(&input), &out.data);
     }
 
     #[test]
@@ -898,20 +918,27 @@ mod tests {
         });
         let input = encode(&DynamicImage::ImageRgba8(img), image::ImageFormat::Png);
         let out = compress(&input, Format::Png, None, NOOP).unwrap();
-        assert!(out.data.len() < input.len(), "expected shrink, got {} -> {}", input.len(), out.data.len());
+        assert!(out.data.len() < input.len() / 2, "expected big shrink, got {} -> {}", input.len(), out.data.len());
         assert_eq!(Format::from_magic(&out.data), Some(Format::Png));
-        image::load_from_memory(&out.data).unwrap();
+        assert_eq!(perceptual_score(&decode(&input), &decode(&out.data)).unwrap(), 100.0, "few colors: lossless palette");
     }
 
     #[test]
-    fn png_photo_stays_visually_lossless() {
+    fn png_photo_meets_the_quality_target() {
         let img = photo(280, 200);
         let input = encode(&img, image::ImageFormat::Png);
         let out = compress(&input, Format::Png, None, NOOP).unwrap();
         assert!(out.data.len() <= input.len());
-        let reference = Reference::new(&img).unwrap();
-        let d = reference.distance(&out.data, image::ImageFormat::Png).unwrap();
-        assert!(d <= DSSIM_PNG_LOSSY * 1.05, "dssim {d} exceeds threshold");
+        assert_meets_target(&img, &out.data);
+    }
+
+    #[test]
+    fn sixteen_bit_png_is_reduced_to_eight_bits() {
+        let img = DynamicImage::ImageRgb16(ImageBuffer::from_fn(120, 80, |x, y| Rgb([(x * 500) as u16, (y * 800) as u16, 30_000])));
+        let input = encode(&img, image::ImageFormat::Png);
+        let out = compress(&input, Format::Png, None, NOOP).unwrap();
+        assert!(out.data.len() < input.len() / 2, "{} -> {}", input.len(), out.data.len());
+        assert_meets_target(&img, &out.data);
     }
 
     #[test]
@@ -924,11 +951,9 @@ mod tests {
     }
 
     #[test]
-    fn exif_orientation_is_parsed_and_applied() {
+    fn exif_orientation_is_applied() {
         let img = photo(320, 240);
         let plain = encode(&img, image::ImageFormat::Jpeg);
-        assert!(exif_orientation(&plain).is_none());
-
         // Splice a minimal APP1/EXIF segment (orientation = 6) after SOI.
         #[rustfmt::skip]
         let app1: Vec<u8> = vec![
@@ -943,98 +968,23 @@ mod tests {
         let mut with_exif = plain[..2].to_vec();
         with_exif.extend_from_slice(&app1);
         with_exif.extend_from_slice(&plain[2..]);
-
-        assert_eq!(exif_orientation(&with_exif), Some(6));
         let out = compress(&with_exif, Format::Jpeg, None, NOOP).unwrap();
-        let decoded = image::load_from_memory(&out.data).unwrap();
+        let decoded = decode(&out.data);
         assert_eq!((decoded.width(), decoded.height()), (240, 320), "orientation should rotate pixels");
-    }
-
-    #[test]
-    fn big_images_are_judged_at_display_scale() {
-        assert_eq!(Reference::judge_dims(800, 600), (800, 600));
-        assert_eq!(Reference::judge_dims(3200, 2000), (1600, 1000));
-        assert_eq!(Reference::judge_dims(2000, 4000), (800, 1600));
-        let r = Reference::new(&photo(3200, 2000)).unwrap();
-        assert_eq!((r.w, r.h), (1600, 1000));
-        // Small images keep 1:1 judging.
-        let r = Reference::new(&photo(320, 240)).unwrap();
-        assert_eq!((r.w, r.h), (320, 240));
+        assert_eq!((out.width, out.height), (240, 320));
     }
 
     #[test]
     fn malformed_exif_never_panics() {
-        // APP1 "Exif" segments with impossible lengths, truncated TIFF
-        // headers and IFD offsets pointing past the end must all be rejected
-        // gracefully — these bytes come straight from untrusted files.
-        let mut cases: Vec<Vec<u8>> = Vec::new();
-        for len in [0u16, 1, 2, 5, 7, 8, 9, 0xFFFF] {
-            let mut j = vec![0xFF, 0xD8, 0xFF, 0xE1];
+        let plain = encode(&photo(64, 48), image::ImageFormat::Jpeg);
+        for len in [2u16, 5, 8, 9, 0xFFFF] {
+            let mut j = plain[..2].to_vec();
+            j.extend_from_slice(&[0xFF, 0xE1]);
             j.extend_from_slice(&len.to_be_bytes());
-            j.extend_from_slice(b"Exif\0\0II*\0");
-            cases.push(j);
+            j.extend_from_slice(b"Exif\0\0II*\0\xFF\xFF\xFF\x7F");
+            j.extend_from_slice(&plain[2..]);
+            let _ = compress(&j, Format::Jpeg, None, NOOP); // Ok or Err, never a panic
         }
-        let mut far_ifd = vec![0xFF, 0xD8, 0xFF, 0xE1, 0x00, 0x20];
-        far_ifd.extend_from_slice(b"Exif\0\0II*\0\xFF\xFF\xFF\x7F");
-        far_ifd.extend_from_slice(&[0u8; 16]);
-        cases.push(far_ifd);
-        cases.push(vec![0xFF, 0xD8, 0xFF]);
-        for c in &cases {
-            let _ = exif_orientation(c);
-        }
-    }
-
-    #[test]
-    fn orientation_variants_transform_dimensions() {
-        let img = photo(40, 20);
-        for o in [1u16, 2, 3, 4] {
-            let t = apply_orientation(img.clone(), o);
-            assert_eq!((t.width(), t.height()), (40, 20), "orientation {o} keeps dims");
-        }
-        for o in [5u16, 6, 7, 8] {
-            let t = apply_orientation(img.clone(), o);
-            assert_eq!((t.width(), t.height()), (20, 40), "orientation {o} swaps dims");
-        }
-    }
-
-    #[test]
-    fn tiff_big_endian_orientation_parses() {
-        #[rustfmt::skip]
-        let tiff: Vec<u8> = vec![
-            b'M', b'M', 0x00, 0x2A, 0x00, 0x00, 0x00, 0x08, // TIFF BE, IFD @8
-            0x00, 0x01,                                     // 1 entry
-            0x01, 0x12, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, // tag 0x0112, SHORT, count 1
-            0x00, 0x03, 0x00, 0x00,                         // value 3 (rotate 180)
-            0x00, 0x00, 0x00, 0x00,
-        ];
-        assert_eq!(parse_tiff_orientation(&tiff), Some(3));
-        assert_eq!(parse_tiff_orientation(b"XXjunk"), None);
-    }
-
-    #[test]
-    fn content_heuristics() {
-        assert!(is_grayscale(&DynamicImage::ImageLuma8(ImageBuffer::from_fn(50, 50, |x, _| {
-            image::Luma([(x * 5) as u8])
-        }))));
-        assert!(!is_grayscale(&photo(100, 100)));
-
-        let flat = ImageBuffer::from_fn(200, 200, |x, _| Rgba([if x < 100 { 0u8 } else { 255 }, 60, 60, 255]));
-        assert!(likely_graphic(&flat));
-        assert!(!likely_graphic(&photo(300, 300).to_rgba8()));
-    }
-
-    #[test]
-    fn large_jpeg_probe_search_stays_visually_lossless() {
-        let img = photo(3200, 2000);
-        let input = encode(&img, image::ImageFormat::Jpeg);
-        let out = compress(&input, Format::Jpeg, None, NOOP).unwrap();
-        assert!(out.data.len() < input.len(), "expected shrink, got {} -> {}", input.len(), out.data.len());
-        let decoded_in = image::load_from_memory(&input).unwrap();
-        let reference = Reference::new(&decoded_in).unwrap();
-        let d = reference.distance(&out.data, image::ImageFormat::Jpeg).unwrap();
-        assert!(d <= DSSIM_JPEG * 1.05, "dssim {d} exceeds threshold");
-        let decoded_out = image::load_from_memory(&out.data).unwrap();
-        assert_eq!((decoded_out.width(), decoded_out.height()), (3200, 2000), "full resolution preserved");
     }
 
     #[test]
@@ -1042,20 +992,18 @@ mod tests {
         let img = photo(400, 300);
         let input = encode(&img, image::ImageFormat::Jpeg);
         let out = compress(&input, Format::Jpeg, Some(200), NOOP).unwrap();
-        let dec = image::load_from_memory(&out.data).unwrap();
+        let dec = decode(&out.data);
         assert_eq!((dec.width(), dec.height()), (200, 150), "aspect ratio preserved");
         assert!(out.note.contains("Resized to 200×150"), "note: {}", out.note);
 
         // Never upscales: a max width larger than the image is a no-op.
         let out = compress(&input, Format::Jpeg, Some(4000), NOOP).unwrap();
-        let dec = image::load_from_memory(&out.data).unwrap();
-        assert_eq!((dec.width(), dec.height()), (400, 300));
+        assert_eq!((out.width, out.height), (400, 300));
         assert!(!out.note.contains("Resized"), "note: {}", out.note);
     }
 
     #[test]
     fn never_inflates_a_file() {
-        // A tiny, already heavily-optimized JPEG must come back byte-identical.
         let img = photo(64, 48);
         let first = compress(&encode(&img, image::ImageFormat::Jpeg), Format::Jpeg, None, NOOP).unwrap();
         let second = compress(&first.data, Format::Jpeg, None, NOOP).unwrap();
@@ -1063,20 +1011,15 @@ mod tests {
     }
 
     #[test]
-    fn jpeg_converts_to_webp_and_stays_visually_lossless() {
+    fn jpeg_converts_to_webp_and_meets_the_quality_target() {
         let img = photo(320, 240);
-        let input = encode(&img, image::ImageFormat::Jpeg);
+        let input = encode_mozjpeg(img.to_rgb8().as_raw(), 320, 240, false, 97, true, None).unwrap();
         let opts = Options { max_width: None, to_webp: true };
         let out = compress_with(&input, Format::Jpeg, &opts, NOOP).unwrap();
         assert_eq!(out.format, Format::Webp);
         assert_eq!(Format::from_magic(&out.data), Some(Format::Webp));
-        assert_eq!((out.width, out.height), (320, 240));
         assert!(out.note.starts_with("Converted to WebP"), "note: {}", out.note);
-
-        let decoded_in = image::load_from_memory(&input).unwrap();
-        let reference = Reference::new(&decoded_in).unwrap();
-        let d = reference.distance(&out.data, image::ImageFormat::WebP).unwrap();
-        assert!(d <= DSSIM_WEBP * 1.05, "dssim {d} exceeds threshold");
+        assert_meets_target(&decode(&input), &out.data);
     }
 
     #[test]
@@ -1090,19 +1033,81 @@ mod tests {
         assert_eq!(out.format, Format::Webp);
         assert_eq!((out.width, out.height), (200, 100));
         let dec = image::load_from_memory_with_format(&out.data, image::ImageFormat::WebP).unwrap();
-        assert_eq!((dec.width(), dec.height()), (200, 100));
         assert!(dec.color().has_alpha(), "transparency must survive the conversion");
         assert!(out.note.contains("Resized to 200×100"), "note: {}", out.note);
     }
 
     #[test]
-    fn webp_flag_on_webp_input_keeps_webp() {
-        let img = photo(200, 150);
-        let input = webp::Encoder::from_rgba(img.to_rgba8().as_raw(), 200, 150).encode(98.0).to_vec();
-        let opts = Options { max_width: None, to_webp: true };
-        let out = compress_with(&input, Format::Webp, &opts, NOOP).unwrap();
-        assert_eq!(out.format, Format::Webp);
-        assert!(out.data.len() <= input.len(), "same-format path never inflates");
+    fn wide_gamut_color_profiles_are_kept_in_every_format() {
+        let p3 = make_profile([[0.5151, 0.2412, -0.0011], [0.2920, 0.6922, 0.0419], [0.1571, 0.0666, 0.7841]], true);
+        let img = photo(160, 120);
+        let jpeg = jpeg_with_icc(&img, &p3);
+
+        let out = compress(&jpeg, Format::Jpeg, Some(100), NOOP).unwrap();
+        assert_eq!(icc_of(&out.data).as_deref(), Some(&p3[..]), "JPEG keeps the P3 profile");
+
+        let to_webp = compress_with(&jpeg, Format::Jpeg, &Options { max_width: None, to_webp: true }, NOOP).unwrap();
+        assert_eq!(icc_of(&to_webp.data).as_deref(), Some(&p3[..]), "WebP gets the P3 profile");
+
+        let png = meta::png_with_chunks(&encode(&img, image::ImageFormat::Png), &[meta::png_iccp(&p3)]).unwrap();
+        let out = compress(&png, Format::Png, Some(100), NOOP).unwrap();
+        assert_eq!(icc_of(&out.data).as_deref(), Some(&p3[..]), "PNG keeps the P3 profile");
+    }
+
+    #[test]
+    fn plain_srgb_profiles_are_dropped() {
+        let srgb = make_profile([[0.4361, 0.2225, 0.0139], [0.3851, 0.7169, 0.0971], [0.1431, 0.0606, 0.7141]], true);
+        let out = compress(&jpeg_with_icc(&photo(160, 120), &srgb), Format::Jpeg, Some(100), NOOP).unwrap();
+        assert_eq!(icc_of(&out.data), None, "sRGB is the default; the profile only costs bytes");
+    }
+
+    #[test]
+    fn animated_and_cmyk_images_are_never_damaged() {
+        let png = encode(&photo(40, 30), image::ImageFormat::Png);
+        let apng = meta::png_with_chunks(&png, &[(*b"acTL", vec![0, 0, 0, 2, 0, 0, 0, 0])]).unwrap();
+        let out = compress(&apng, Format::Png, None, NOOP).unwrap();
+        assert_eq!(out.data, apng, "animation kept byte-for-byte");
+        assert!(compress(&apng, Format::Png, Some(20), NOOP).is_err(), "resizing would drop frames");
+
+        let cmyk_px: Vec<u8> = (0..40 * 30).flat_map(|i| [(i % 200) as u8, 40, 80, 10]).collect();
+        let cmyk = std::panic::catch_unwind(|| {
+            let mut c = mozjpeg::Compress::new(mozjpeg::ColorSpace::JCS_CMYK);
+            c.set_size(40, 30);
+            let mut s = c.start_compress(Vec::new()).unwrap();
+            s.write_scanlines(&cmyk_px).unwrap();
+            s.finish().unwrap()
+        })
+        .unwrap();
+        assert_eq!(meta::jpeg_components(&cmyk), Some(4));
+        let out = compress(&cmyk, Format::Jpeg, None, NOOP).unwrap();
+        assert_eq!(out.data, cmyk);
+        assert!(compress_with(&cmyk, Format::Jpeg, &Options { max_width: None, to_webp: true }, NOOP).is_err());
+    }
+
+    #[test]
+    fn tiny_images_work_in_every_format() {
+        for (w, h) in [(1, 1), (3, 5), (7, 7)] {
+            let img = photo(w, h);
+            let png = encode(&img, image::ImageFormat::Png);
+            compress(&png, Format::Png, None, NOOP).unwrap();
+            compress_with(&png, Format::Png, &Options { max_width: None, to_webp: true }, NOOP).unwrap();
+            let jpeg = encode(&img, image::ImageFormat::Jpeg);
+            compress(&jpeg, Format::Jpeg, None, NOOP).unwrap();
+        }
+    }
+
+    #[test]
+    fn oversized_images_are_rejected_before_decoding() {
+        let mut png = encode(&photo(8, 8), image::ImageFormat::Png);
+        // Patch IHDR to claim 100 000 × 100 000 pixels (10 gigapixels).
+        png[16..20].copy_from_slice(&100_000u32.to_be_bytes());
+        png[20..24].copy_from_slice(&100_000u32.to_be_bytes());
+        let crc = meta::crc32(&png[12..29]);
+        png[29..33].copy_from_slice(&crc.to_be_bytes());
+        let t = std::time::Instant::now();
+        let err = compress(&png, Format::Png, None, NOOP).err().expect("must be rejected");
+        assert!(format!("{err:#}").contains("too large"), "{err:#}");
+        assert!(t.elapsed() < std::time::Duration::from_secs(1), "rejected from the header alone");
     }
 
     #[test]
@@ -1113,14 +1118,50 @@ mod tests {
         let mut png = vec![0x89, b'P', b'N', b'G', 0x0D, 0x0A, 0x1A, 0x0A];
         png.extend(std::iter::repeat_n(0, 64));
         assert!(compress(&png, Format::Png, None, NOOP).is_err());
+        assert!(compress(b"RIFF\x10\0\0\0WEBPVP8 \x04\0\0\0\0\0\0\0", Format::Webp, None, NOOP).is_err());
     }
 
     #[test]
-    fn oversized_rejected() {
-        // Tiny file claiming huge dimensions is caught by the decoder or cap;
-        // here just verify the pixel cap constant is enforced via decode().
-        let img = photo(64, 64);
-        let input = encode(&img, image::ImageFormat::Png);
-        assert!(decode(&input, Format::Png).is_ok());
+    fn color_casts_fail_even_when_structure_is_perfect() {
+        let img = photo(200, 150);
+        let cast = DynamicImage::ImageRgb8(image::RgbImage::from_fn(200, 150, |x, y| {
+            let p = img.to_rgb8().get_pixel(x, y).0;
+            Rgb([(p[0] as f32 * 0.97) as u8, p[1], p[2]])
+        }));
+        let s = perceptual_score(&img, &cast).unwrap();
+        assert!(s < TARGET_SCORE, "a 3% red cast must not pass (score {s})");
+        assert!(perceptual_score(&img, &img).unwrap() > 99.9);
+    }
+
+    #[test]
+    fn search_finds_the_lowest_passing_quality() {
+        // Synthetic monotone score curve: passes from q=73 up.
+        let curve = |q: u8| 44.0 + q as f64 * 0.5;
+        let mut calls = 0;
+        let found = search(
+            40,
+            95,
+            80,
+            |q| Ok(vec![q]),
+            |b| {
+                calls += 1;
+                Ok(curve(b[0]))
+            },
+            &mut || {},
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(found.q, 72, "44 + 72*0.5 = 80 is the first pass");
+        assert!(calls <= 5, "took {calls} evaluations");
+        let none = search(40, 95, 80, |q| Ok(vec![q]), |_| Ok(10.0), &mut || {}).unwrap();
+        assert!(none.is_none());
+    }
+
+    #[test]
+    fn judging_size() {
+        assert_eq!(judge_dims(800, 600), (800, 600));
+        assert_eq!(judge_dims(1920, 1080), (1920, 1080));
+        assert_eq!(judge_dims(4000, 2250), (1920, 1080));
+        assert_eq!(judge_dims(3000, 6000), (960, 1920));
     }
 }

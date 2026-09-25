@@ -125,11 +125,14 @@ pub fn probe(path: &Path) -> Result<ImageInfo> {
     File::open(path)?.take(PROBE_BYTES as u64).read_to_end(&mut head)?;
     let format = Format::from_magic(&head).context("not a JPG, PNG or WEBP image")?;
 
-    let reader = image::ImageReader::with_format(io::BufReader::new(File::open(path)?), image_format(format));
-    let (mut width, mut height) = reader.into_dimensions().context("could not read image dimensions")?;
-    if format == Format::Jpeg && matches!(compress::exif_orientation(&head), Some(5..=8)) {
-        std::mem::swap(&mut width, &mut height);
-    }
+    // Headers almost always fit in the prefix; unusual files (huge metadata
+    // before the image data) fall back to reading the whole file.
+    let (width, height) = match compress::header_dimensions(&head, format) {
+        Ok(dims) => dims,
+        Err(_) if (head.len() as u64) < size => compress::header_dimensions(&fs::read(path)?, format)
+            .context("could not read image dimensions")?,
+        Err(e) => return Err(e.context("could not read image dimensions")),
+    };
     Ok(ImageInfo {
         path: path.to_path_buf(),
         name: display_name(path),
@@ -153,14 +156,6 @@ pub fn read_image(path: &Path) -> Result<(Vec<u8>, Format)> {
     let bytes = fs::read(path)?;
     let format = Format::from_magic(&bytes).context("not a JPG, PNG or WEBP image")?;
     Ok((bytes, format))
-}
-
-fn image_format(f: Format) -> image::ImageFormat {
-    match f {
-        Format::Jpeg => image::ImageFormat::Jpeg,
-        Format::Png => image::ImageFormat::Png,
-        Format::Webp => image::ImageFormat::WebP,
-    }
 }
 
 pub fn display_name(path: &Path) -> String {

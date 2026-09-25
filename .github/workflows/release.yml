@@ -1,18 +1,23 @@
-# Builds signed-for-update installers for macOS (Apple Silicon) and Windows
-# and publishes them as a GitHub Release, together with the latest.json
-# manifest the in-app updater reads.
+# Builds installers for macOS (Apple Silicon) and Windows, signed for the
+# in-app updater, and publishes them as a GitHub Release together with the
+# latest.json manifest the updater reads.
 #
-# To release: bump `version` in src-tauri/Cargo.toml, commit, then
-#   git tag v0.2.0 && git push origin v0.2.0
+# To release: bump `version` in src-tauri/Cargo.toml, describe the changes
+# under a matching heading in CHANGELOG.md (these become the release notes),
+# commit, then
+#   git tag v0.2.0 && git push origin main v0.2.0
+# Don't create the release by hand on GitHub — this workflow creates it and
+# attaches the installers when the builds finish (about 20 minutes).
 #
-# Requires the repository secret TAURI_SIGNING_PRIVATE_KEY (contents of
-# ~/.tauri/sw3-images-updater.key). If the key has a password, also set
+# Requires the repository secret TAURI_SIGNING_PRIVATE_KEY: the full contents
+# of ~/.tauri/sw3-images-updater.key. If the key has a password, also set
 # TAURI_SIGNING_PRIVATE_KEY_PASSWORD.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -34,14 +39,33 @@ jobs:
             args: --target x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Tag must match the app version
         shell: bash
         run: |
           version=$(grep -m1 '^version' src-tauri/Cargo.toml | sed -E 's/.*"(.*)".*/\1/')
+          if [ "$GITHUB_REF_TYPE" != "tag" ]; then
+            echo "::error::Run this workflow from a version tag (v$version), not a branch."
+            exit 1
+          fi
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match src-tauri/Cargo.toml version $version"
+            exit 1
+          fi
+
+      # Fails in seconds with a clear message instead of after a 10-minute build.
+      - name: Updater signing key is configured
+        shell: bash
+        env:
+          KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+        run: |
+          if [ -z "$KEY" ]; then
+            echo "::error::The TAURI_SIGNING_PRIVATE_KEY secret is missing. Add it under Settings → Secrets and variables → Actions (value: the full contents of ~/.tauri/sw3-images-updater.key)."
+            exit 1
+          fi
+          if ! printf '%s' "$KEY" | base64 --decode 2>/dev/null | grep -q "secret key"; then
+            echo "::error::TAURI_SIGNING_PRIVATE_KEY doesn't look like a Tauri private key. Paste the contents of ~/.tauri/sw3-images-updater.key (not the .pub file)."
             exit 1
           fi
 
@@ -55,17 +79,44 @@ jobs:
         if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v5
         with:
           node-version: 22
           cache: npm
 
-      - run: npm ci
+      - run: npm ci --ignore-scripts
 
       - name: Run the test suite before shipping
         run: |
           npm test
           cargo test --workspace --locked
+
+      - name: Release notes from CHANGELOG.md
+        id: notes
+        shell: bash
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          notes=$(awk -v v="$version" '
+            /^## / { if (found) exit; if (index($0, "[" v "]")) { found = 1; next } }
+            found { print }
+          ' CHANGELOG.md)
+          if [ -z "$notes" ]; then
+            echo "::error::CHANGELOG.md has no section for $version (expected a heading like: ## [$version])"
+            exit 1
+          fi
+          {
+            echo "body<<EOF_NOTES"
+            echo "$notes"
+            echo
+            echo "---"
+            echo
+            echo "**macOS (Apple Silicon):** download the \`.dmg\` and drag SW3 Images to Applications. The first time, right-click the app → Open (or System Settings → Privacy & Security → Open Anyway), because the app isn't notarized by Apple."
+            echo
+            echo "**Windows:** download and run the \`-setup.exe\`. If SmartScreen warns, click More info → Run anyway."
+            echo
+            echo "Already installed? The app updates itself."
+            echo "EOF_NOTES"
+          } >> "$GITHUB_OUTPUT"
 
       - uses: tauri-apps/tauri-action@v0
         env:
@@ -75,11 +126,7 @@ jobs:
         with:
           tagName: ${{ github.ref_name }}
           releaseName: SW3 Images ${{ github.ref_name }}
-          releaseBody: |
-            **macOS (Apple Silicon):** download the `.dmg`, drag SW3 Images to Applications. The first time, right-click the app → Open (or System Settings → Privacy & Security → Open Anyway), because the app isn't notarized by Apple.
-            **Windows:** download and run the `-setup.exe`. If SmartScreen warns, click More info → Run anyway.
-
-            Already installed? The app updates itself.
+          releaseBody: ${{ steps.notes.outputs.body }}
           releaseDraft: false
           prerelease: false
           updaterJsonPreferNsis: true

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import * as L from "../lib.js";
+import * as L from "../../ui/lib.js";
 
 test("formatBytes matches the design", () => {
   assert.equal(L.formatBytes(0), "0 B");
@@ -89,6 +89,12 @@ test("done totals", () => {
     { status: "done", size: 500, outSize: 50 },
   ]);
   assert.deepEqual(t, { orig: 1500, out: 150, done: 2, failed: 1 });
+});
+
+test("growth percentage for outputs that got bigger", () => {
+  assert.equal(L.growthPct(1000, 1120), 12);
+  assert.equal(L.growthPct(1000, 1001), 1, "never shows +0%");
+  assert.equal(L.growthPct(1000, 900), 0);
 });
 
 test("plural + tile variants", () => {

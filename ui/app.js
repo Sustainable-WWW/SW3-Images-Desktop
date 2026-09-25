@@ -16,8 +16,8 @@ function tauriApi() {
     onDragDrop(handler) {
       return T.webview.getCurrentWebview().onDragDropEvent((e) => handler(e.payload));
     },
-    onMenu(handler) {
-      return T.event.listen("menu", (e) => handler(e.payload));
+    on(event, handler) {
+      return T.event.listen(event, (e) => handler(e.payload));
     },
   };
 }
@@ -29,8 +29,7 @@ if (navigator.userAgent.includes("Mac")) document.documentElement.classList.add(
 
 const PREFS_KEY = "sw3.prefs";
 const state = {
-  images: [], // current selection: { id, path, name, format, width, height, size }
-  nextId: 1,
+  images: [], // current selection: { id, path, name, format, width, height, size } (ids come from Rust)
   prefs: loadPrefs(),
   scanning: 0,
   job: null,
@@ -114,10 +113,17 @@ function appendTiles(images) {
   grid.append(frag);
 }
 
+/** Tell Rust to drop images the UI no longer shows. */
+function forget(ids) {
+  if (ids.length) api.invoke("forget_images", { ids }).catch(() => {});
+}
+
 function addScanned(result) {
-  const incoming = result.images.map((i) => ({ ...i, id: state.nextId++ }));
+  const incoming = result.images;
   const { merged, added, duplicates } = L.mergeImages(state.images, incoming);
   const addedImages = merged.slice(state.images.length);
+  const kept = new Set(addedImages.map((i) => i.id));
+  forget(incoming.filter((i) => !kept.has(i.id)).map((i) => i.id));
   state.images = merged;
   appendTiles(addedImages);
   renderSetup();
@@ -157,11 +163,13 @@ grid.addEventListener("click", (e) => {
   const tile = btn.closest(".tile");
   const id = Number(tile.dataset.id);
   state.images = state.images.filter((i) => i.id !== id);
+  forget([id]);
   tile.remove();
   renderSetup();
 });
 
 $("clear").addEventListener("click", () => {
+  forget(state.images.map((i) => i.id));
   state.images = [];
   grid.replaceChildren();
   renderSetup();
@@ -262,7 +270,7 @@ async function startBatch() {
 
   try {
     await api.invoke("start_batch", {
-      items: items.map(({ id, path }) => ({ id, path })),
+      ids: items.map((i) => i.id),
       options: opts,
       onEvent: job.channel,
     });
@@ -356,9 +364,13 @@ function renderRow(it) {
       break;
     }
     case "done": {
+      // Converting to WebP can occasionally grow a file that was already
+      // tiny; say so instead of pretending it was optimal.
       const saved = L.savingsPct(it.size, it.outSize);
+      const grew = it.outSize > it.size;
+      const label = saved > 0 ? `-${saved}%` : grew ? `+${L.growthPct(it.size, it.outSize)}%` : "Already optimal";
       const pill = el("span", saved > 0 ? "pill" : "pill same");
-      pill.append(icon("i-check"), document.createTextNode(saved > 0 ? `-${saved}%` : "Already optimal"));
+      pill.append(icon("i-check"), document.createTextNode(label));
       row.title = `${it.outName}\n${it.note}`;
       parts.push(pill);
       break;
@@ -439,7 +451,7 @@ list.addEventListener("click", async (e) => {
   renderRow(it);
   scheduleHero();
   try {
-    await api.invoke("retry_file", { item: { id: it.id, path: it.path }, options: job.opts, onEvent: job.channel });
+    await api.invoke("retry_file", { id: it.id, options: job.opts, onEvent: job.channel });
   } catch (e) {
     it.status = "failed";
     it.error = errorText(e);
@@ -548,6 +560,7 @@ $("stop").addEventListener("click", async () => {
 });
 
 function newBatch() {
+  forget(state.images.map((i) => i.id));
   state.job = null;
   state.images = [];
   grid.replaceChildren();
@@ -559,23 +572,27 @@ function newBatch() {
 $("show-folder").addEventListener("click", () => api.invoke("open_output_dir").catch((e) => toast(errorText(e))));
 
 // ---------------------------------------------------------- drag & drop
+// The webview only shows the drop overlay; the dropped paths are handled by
+// Rust (scanned there, never passed back through the UI).
 
 const veil = $("drag-veil");
 api.onDragDrop((p) => {
   const busy = state.job?.running;
   if (p.type === "enter" || p.type === "over") {
     if (!busy) veil.hidden = false;
-  } else if (p.type === "leave") {
+  } else {
     veil.hidden = true;
-  } else if (p.type === "drop") {
-    veil.hidden = true;
-    if (busy) {
-      toast("Hold on — drop more images when this batch has finished");
-      return;
-    }
-    if (state.job) newBatch(); // dropping on a finished batch starts a new one
-    if (p.paths?.length) scanWith(api.invoke("scan_paths", { paths: p.paths }));
   }
+});
+api.on("drop-ignored", () => toast("Hold on — drop more images when this batch has finished"));
+api.on("scan-started", () => {
+  if (state.job && !state.job.running) newBatch(); // dropping on a finished batch starts a new one
+  state.scanning++;
+  renderSetup();
+});
+api.on("scanned", (result) => {
+  state.scanning = Math.max(0, state.scanning - 1);
+  addScanned(result);
 });
 
 // -------------------------------------------------------------- updates
@@ -627,7 +644,7 @@ $("update-btn").addEventListener("click", async () => {
 // ------------------------------------------------------------------ init
 
 // Native menu items (File → Add Images… ⌘O, Check for Updates…).
-api.onMenu((id) => {
+api.on("menu", (id) => {
   if (id === "add_images") browse();
   else if (id === "check_updates") checkForUpdate(true);
 });

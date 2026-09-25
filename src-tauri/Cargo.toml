@@ -1,7 +1,7 @@
 [package]
 name = "sw3-images-desktop"
 # The app version (shown in the UI and used by the updater) comes from here.
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 description = "SW3 Images — compress, resize and convert images for the web"
 license = "MIT"
@@ -24,6 +24,8 @@ tauri-plugin-updater = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 anyhow = "1"
+# Total RAM, to size the parallel-compression memory budget.
+sysinfo = { version = "0.39", default-features = false, features = ["system"] }
 
 [dev-dependencies]
-image = "0.25"
+image = { version = "0.25", default-features = false, features = ["png", "jpeg"] }

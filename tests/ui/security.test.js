@@ -7,7 +7,7 @@ import { readFileSync, readdirSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 
-const ui = fileURLToPath(new URL("..", import.meta.url));
+const ui = fileURLToPath(new URL("../../ui/", import.meta.url));
 const read = (f) => readFileSync(join(ui, f), "utf8");
 const scripts = readdirSync(ui).filter((f) => f.endsWith(".js"));
 const htmlFiles = readdirSync(ui).filter((f) => f.endsWith(".html"));
@@ -36,9 +36,18 @@ test("nothing is loaded from the network", () => {
   }
 });
 
-test("dev mock is only loaded outside the app", () => {
+test("dev mock is only loaded outside the app and is not shipped", () => {
   const app = read("app.js");
   assert.match(app, /window\.__TAURI__\s*\?\s*tauriApi\(\)\s*:\s*\(await import\("\.\/dev-mock\.js"\)\)/);
+  assert.ok(!readdirSync(ui).includes("dev-mock.js"), "the design-preview mock must stay out of ui/ (the bundled folder)");
+});
+
+test("the UI never sends file paths to Rust", () => {
+  const app = read("app.js");
+  assert.ok(!/scan_paths/.test(app), "drops are handled in Rust");
+  for (const m of app.matchAll(/invoke\("(start_batch|retry_file)",\s*\{([^}]*)\}/g)) {
+    assert.ok(!/path/.test(m[2]), `${m[1]} must send ids only`);
+  }
 });
 
 test("user text is written with textContent", () => {
