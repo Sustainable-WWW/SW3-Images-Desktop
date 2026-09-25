@@ -268,28 +268,64 @@ mod tests {
         MemoryBudget::new(8 * 1024 * MB)
     }
 
+    /// Wait (bounded) for a condition another thread makes true.
+    fn wait_until(cond: impl Fn() -> bool) {
+        let t0 = Instant::now();
+        while !cond() {
+            assert!(t0.elapsed() < std::time::Duration::from_secs(10), "timed out waiting");
+            std::thread::sleep(std::time::Duration::from_millis(1));
+        }
+    }
+
     #[test]
-    fn memory_budget_limits_concurrency_and_serves_in_order() {
+    fn memory_budget_never_exceeds_its_total() {
         let budget = MemoryBudget::new(100);
         let in_use = std::sync::atomic::AtomicU64::new(0);
         let peak = std::sync::atomic::AtomicU64::new(0);
-        let order = Mutex::new(Vec::new());
         std::thread::scope(|s| {
-            for (i, cost) in [60u64, 60, 10, 10, 250, 10].into_iter().enumerate() {
-                let (budget, in_use, peak, order) = (&budget, &in_use, &peak, &order);
+            for i in 0..24usize {
+                let (budget, in_use, peak) = (&budget, &in_use, &peak);
                 s.spawn(move || {
-                    std::thread::sleep(std::time::Duration::from_millis(i as u64 * 5));
-                    let r = budget.reserve(cost);
+                    let r = budget.reserve([60, 10, 35, 250, 5][i % 5]);
                     let now = in_use.fetch_add(r.amount, Ordering::SeqCst) + r.amount;
                     peak.fetch_max(now, Ordering::SeqCst);
-                    order.lock().unwrap().push(i);
-                    std::thread::sleep(std::time::Duration::from_millis(20));
+                    std::thread::sleep(std::time::Duration::from_millis(2));
                     in_use.fetch_sub(r.amount, Ordering::SeqCst);
                 });
             }
         });
-        assert!(peak.load(Ordering::SeqCst) <= 100, "never more than the budget in use");
-        assert_eq!(order.into_inner().unwrap(), vec![0, 1, 2, 3, 4, 5], "first come, first served; oversize runs alone");
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(peak > 0 && peak <= 100, "peak {peak} must stay within the budget");
+    }
+
+    /// Arrival order is controlled by the test (each request is confirmed
+    /// queued before the next is made), so this doesn't depend on thread
+    /// scheduling.
+    #[test]
+    fn memory_budget_serves_in_arrival_order() {
+        let budget = MemoryBudget::new(100);
+        let tickets = || budget.state.lock().unwrap().next_ticket;
+        let held = budget.reserve(60);
+        let order = Mutex::new(Vec::new());
+        std::thread::scope(|s| {
+            // A big image arrives first and must wait for the whole budget.
+            s.spawn(|| {
+                let _r = budget.reserve(250);
+                order.lock().unwrap().push("big");
+            });
+            wait_until(|| tickets() == 2);
+            // A small one arrives next. There is room for it (40 free), but
+            // it must queue behind the big one instead of starving it.
+            s.spawn(|| {
+                let _r = budget.reserve(10);
+                order.lock().unwrap().push("small");
+            });
+            wait_until(|| tickets() == 3);
+            std::thread::sleep(std::time::Duration::from_millis(50));
+            assert!(order.lock().unwrap().is_empty(), "nothing may run while the big image waits its turn");
+            drop(held);
+        });
+        assert_eq!(order.into_inner().unwrap(), vec!["big", "small"]);
     }
 
     #[test]

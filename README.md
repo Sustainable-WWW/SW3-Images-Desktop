@@ -247,10 +247,17 @@ installers, signs them for the updater, and publishes everything.
    example `0.2.0`, and commit.
 2. Push a matching tag: `git tag v0.2.0 && git push origin main v0.2.0`
 
+   If your `origin` is a server that mirrors to GitHub, always create tags
+   locally and push them to that server. A tag made on GitHub (for example
+   through its "Draft a new release" page) is deleted by the next mirror
+   sync, and its release disappears with it.
+
 The workflow runs the tests, builds the macOS `.dmg` and the Windows
 `-setup.exe`, and creates the GitHub Release with the files and
 `latest.json`. That takes about 20 minutes. **Don't create the release on
-GitHub by hand**: the workflow creates it. A hand-made release shows only
+GitHub by hand**: the workflow creates it. And don't delete a published
+version's tag: the workflow can't recreate it, so to redo a release, bump the
+version and push a new tag. A hand-made release shows only
 "Source code" until the builds finish, and the updater reports no update
 until `latest.json` is attached.
 

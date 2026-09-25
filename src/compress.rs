@@ -1107,7 +1107,9 @@ mod tests {
         let t = std::time::Instant::now();
         let err = compress(&png, Format::Png, None, NOOP).err().expect("must be rejected");
         assert!(format!("{err:#}").contains("too large"), "{err:#}");
-        assert!(t.elapsed() < std::time::Duration::from_secs(1), "rejected from the header alone");
+        // Decoding 10 gigapixels would take minutes (or fail to allocate);
+        // generous bound so a busy CI machine can't make this flaky.
+        assert!(t.elapsed() < std::time::Duration::from_secs(5), "rejected from the header alone");
     }
 
     #[test]

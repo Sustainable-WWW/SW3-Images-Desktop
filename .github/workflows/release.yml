@@ -7,7 +7,10 @@
 # commit, then
 #   git tag v0.2.0 && git push origin main v0.2.0
 # Don't create the release by hand on GitHub — this workflow creates it and
-# attaches the installers when the builds finish (about 20 minutes).
+# attaches the installers when the builds finish (about 20 minutes). Don't
+# delete a version's tag either: to redo a release, bump the version and push
+# a new tag. When pushing through a mirror, create tags locally and push them
+# to the mirror's source; tags made on GitHub are removed by the next sync.
 #
 # Requires the repository secret TAURI_SIGNING_PRIVATE_KEY: the full contents
 # of ~/.tauri/sw3-images-updater.key. If the key has a password, also set
@@ -51,6 +54,16 @@ jobs:
           fi
           if [ "v$version" != "$GITHUB_REF_NAME" ]; then
             echo "::error::Tag $GITHUB_REF_NAME does not match src-tauri/Cargo.toml version $version"
+            exit 1
+          fi
+
+      # A re-run after the tag was deleted can't publish (the workflow may not
+      # recreate tags), so stop right away with a clear message.
+      - name: Tag still exists on GitHub
+        shell: bash
+        run: |
+          if ! git ls-remote --exit-code --tags origin "refs/tags/$GITHUB_REF_NAME" >/dev/null; then
+            echo "::error::The tag $GITHUB_REF_NAME no longer exists on GitHub (was it deleted together with its release?). Re-running can't bring it back — push a new version tag instead."
             exit 1
           fi
 

@@ -92,7 +92,7 @@ made visible changes, usually to colors.
 - CI now also runs cargo-deny (known vulnerabilities and a license
   allowlist), checks that the license notices are up to date, and uses the
   current GitHub Actions versions.
-- 87 automated tests covering quality, color, file safety, security
+- 89 automated tests covering quality, color, file safety, security
   configuration and the UI.
 - Test and design-preview files are no longer bundled into the app.
 
