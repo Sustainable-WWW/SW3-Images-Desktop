@@ -15,8 +15,12 @@ Get the latest version from
 
 | Platform | Requirements | File |
 | --- | --- | --- |
-| macOS | macOS 11 (Big Sur) or later, Apple Silicon (M1 or newer) | `SW3 Images_x.y.z_aarch64.dmg` |
+| macOS (Apple Silicon) | macOS 11 (Big Sur) or later, Apple Silicon (M1 or newer) | `SW3 Images_x.y.z_aarch64.dmg` |
+| macOS (Intel) | macOS 11 (Big Sur) or later, Intel processor | `SW3 Images_x.y.z_x64.dmg` |
 | Windows | Windows 10 or 11, 64-bit (x64) | `SW3 Images_x.y.z_x64-setup.exe` |
+
+Not sure which Mac you have? **Apple menu → About This Mac** shows **Chip**
+(Apple Silicon) or **Processor** (Intel).
 
 **macOS:** open the `.dmg` and drag SW3 Images to Applications. The app is
 not notarized by Apple, so the first launch shows a warning. Right-click the

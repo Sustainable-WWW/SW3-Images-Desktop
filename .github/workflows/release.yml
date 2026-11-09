@@ -1,6 +1,13 @@
-# Builds installers for macOS (Apple Silicon) and Windows, signed for the
-# in-app updater, and publishes them as a GitHub Release together with the
-# latest.json manifest the updater reads.
+# Builds installers for macOS (Apple Silicon and Intel) and Windows, signed
+# for the in-app updater, and publishes them as a GitHub Release together with
+# the latest.json manifest the updater reads.
+#
+# Both macOS builds run on the self-hosted Mac (runner labels: self-hosted,
+# macOS, ARM64), one after the other; the Intel build is cross-compiled there
+# (no Rosetta needed). Windows builds on GitHub's runner. The Mac must be
+# awake with its runner online: otherwise the macOS builds wait in the queue
+# (up to 24 hours) and the release only has the Windows installer until they
+# have run.
 #
 # To release: bump `version` in src-tauri/Cargo.toml, describe the changes
 # under a matching heading in CHANGELOG.md (these become the release notes),
@@ -33,9 +40,13 @@ jobs:
       matrix:
         include:
           - name: macOS Apple Silicon
-            os: macos-latest
+            os: [self-hosted, macOS, ARM64]
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
+          - name: macOS Intel
+            os: [self-hosted, macOS, ARM64]
+            target: x86_64-apple-darwin
+            args: --target x86_64-apple-darwin
           - name: Windows
             os: windows-latest
             target: x86_64-pc-windows-msvc
@@ -86,10 +97,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # Only on GitHub's runners: the self-hosted Mac keeps its own Cargo
+      # download cache, which this action's cleanup would prune.
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
 
+      # mozjpeg's x86 SIMD kernels are written in NASM assembly.
       - name: Install NASM
-        if: runner.os == 'Windows'
+        if: runner.os == 'Windows' || matrix.target == 'x86_64-apple-darwin'
         uses: ilammy/setup-nasm@v1
 
       - uses: actions/setup-node@v5
@@ -123,7 +138,7 @@ jobs:
             echo
             echo "---"
             echo
-            echo "**macOS (Apple Silicon):** download the \`.dmg\` and drag SW3 Images to Applications. The first time, right-click the app → Open (or System Settings → Privacy & Security → Open Anyway), because the app isn't notarized by Apple."
+            echo "**macOS:** download the \`_aarch64.dmg\` for Macs with Apple Silicon (M1 or newer), or the \`_x64.dmg\` for Intel Macs (Apple menu → About This Mac shows Chip or Processor). Open it and drag SW3 Images to Applications. The first time, right-click the app → Open (or System Settings → Privacy & Security → Open Anyway), because the app isn't notarized by Apple."
             echo
             echo "**Windows:** download and run the \`-setup.exe\`. If SmartScreen warns, click More info → Run anyway."
             echo

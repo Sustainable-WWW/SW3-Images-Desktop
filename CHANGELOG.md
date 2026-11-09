@@ -4,6 +4,28 @@ All notable changes to SW3 Images. The release workflow publishes each
 version's section below as its GitHub release notes, which the in-app update
 prompt also shows.
 
+## [0.1.3] — 2026-11-09
+
+SW3 Images now has a version for Intel Macs, and update checks use an updated
+security library.
+
+- **New: a version for Intel Macs.** Download the `_x64.dmg` for a Mac with
+  an Intel processor (macOS 11 Big Sur or later). Macs with Apple Silicon
+  keep their own version, built just for them.
+- **Security update.** The secure connection used to check for updates now
+  uses the latest version of its TLS library (rustls), which fixes several
+  recently reported security issues.
+
+### For developers
+
+- Both macOS builds and the macOS tests now run on a self-hosted Mac runner;
+  Windows still builds on GitHub's runners. The Intel version is
+  cross-compiled there, without Rosetta.
+- The dependency check and the license notices now cover the Intel Mac build
+  too. Four advisories in the `zip` crate are documented as not affecting
+  the app: only the Windows updater uses it, for signature-checked `.zip`
+  updates, which this app doesn't ship.
+
 ## [0.1.2] — 2026-11-09
 
 Fixes drag and drop, which stopped working in 0.1.1.

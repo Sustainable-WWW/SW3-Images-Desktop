@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "sw3-images"
-version = "0.1.2"
+version = "0.1.3"
 edition = "2021"
 description = "SW3 Images engine — smart, visually-lossless image compression, resizing and WebP conversion"
 license = "MIT"

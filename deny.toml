@@ -3,12 +3,23 @@
 # the app under MIT.
 
 [graph]
-targets = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
 exclude-dev = true
 
 [advisories]
 # Unmaintained crates deep in Tauri's tree are reported, not fatal.
 unmaintained = "workspace"
+# zip 4.x is only used by tauri-plugin-updater on Windows, to unpack .zip
+# updates. Ours are NSIS .exe files, never zips, and the updater checks an
+# update's signature before unpacking anything. The fix (zip >= 9) needs a
+# newer updater plugin: remove these once `cargo deny` reports them as no
+# longer detected.
+ignore = [
+    { id = "RUSTSEC-2026-0367", reason = "zip in the updater: only signature-checked updates, ours aren't zips" },
+    { id = "RUSTSEC-2026-0368", reason = "zip in the updater: only signature-checked updates, ours aren't zips" },
+    { id = "RUSTSEC-2026-0369", reason = "zip in the updater: only signature-checked updates, ours aren't zips" },
+    { id = "RUSTSEC-2026-0429", reason = "zip in the updater: only signature-checked updates, ours aren't zips" },
+]
 
 [licenses]
 allow = [

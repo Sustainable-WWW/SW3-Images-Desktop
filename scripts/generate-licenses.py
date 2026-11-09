@@ -21,7 +21,7 @@ import subprocess
 import sys
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
-TARGETS = ["aarch64-apple-darwin", "x86_64-pc-windows-msvc"]
+TARGETS = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-pc-windows-msvc"]
 
 IJG_STATEMENT = "This software is based in part on the work of the Independent JPEG Group."
 

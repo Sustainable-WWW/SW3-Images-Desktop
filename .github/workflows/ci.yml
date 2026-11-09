@@ -1,6 +1,7 @@
 # Runs the full test suite on every push and pull request, on both platforms
 # the app ships for, plus dependency checks: known vulnerabilities, licenses
 # that allow redistribution, and up-to-date third-party license notices.
+# The macOS tests run on the self-hosted Mac (see `runs-on` below).
 name: CI
 
 on:
@@ -25,15 +26,24 @@ jobs:
         include:
           - name: macOS Apple Silicon
             os: macos-latest
+            self_hosted: true
           - name: Windows
             os: windows-latest
-    runs-on: ${{ matrix.os }}
+    # macOS runs on the self-hosted Mac (labels: self-hosted, macOS, ARM64),
+    # except pull requests from forks, which use GitHub's macOS runner so
+    # outside code doesn't run on the Mac. A pull request can edit this file,
+    # though: the real safeguard is requiring approval before fork pull
+    # requests run workflows (Settings → Actions → General).
+    runs-on: ${{ matrix.self_hosted && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "macOS", "ARM64"]') || matrix.os }}
     steps:
       - uses: actions/checkout@v5
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Only on GitHub's runners: the self-hosted Mac keeps its own Cargo
+      # download cache, which this action's cleanup would prune.
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
 
       # mozjpeg's x86 SIMD kernels are written in NASM assembly.
       - name: Install NASM
