@@ -24,7 +24,7 @@ use sw3_images::compress::Options;
 use sw3_images::files::{self, ImageInfo};
 use tauri::ipc::Channel;
 use tauri::window::{ProgressBarState, ProgressBarStatus};
-use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WebviewEvent};
+use tauri::{AppHandle, DragDropEvent, Emitter, Manager, State, WindowEvent};
 use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_notification::NotificationExt;
 use tauri_plugin_opener::OpenerExt;
@@ -369,10 +369,12 @@ pub fn run() {
             menu::install(app.handle())?;
             Ok(())
         })
-        .on_webview_event(|webview, event| {
-            if let WebviewEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
-                if webview.label() == "main" && !paths.is_empty() {
-                    on_drop(webview.app_handle(), paths.clone());
+        // Drops on a window's own webview arrive as *window* events; Tauri only
+        // sends `WebviewEvent::DragDrop` for child webviews, which we don't use.
+        .on_window_event(|window, event| {
+            if let WindowEvent::DragDrop(DragDropEvent::Drop { paths, .. }) = event {
+                if window.label() == "main" && !paths.is_empty() {
+                    on_drop(window.app_handle(), paths.clone());
                 }
             }
         })

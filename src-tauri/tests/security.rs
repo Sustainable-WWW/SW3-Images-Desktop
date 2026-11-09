@@ -58,6 +58,19 @@ fn webview_permissions_are_minimal() {
     assert_eq!(files.len(), 1, "only capabilities/default.json is expected, found {files:?}");
 }
 
+/// Dropped files are only accepted in Rust. Tauri reports a drop on a
+/// window's own webview as a `WindowEvent` (`WebviewEvent::DragDrop` only
+/// fires for child webviews), so a handler registered anywhere else never
+/// runs: the drop overlay still shows, but no images get added.
+#[test]
+fn dropped_files_reach_the_rust_handler() {
+    let lib = std::fs::read_to_string(std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/lib.rs")).unwrap();
+    assert!(
+        lib.contains(".on_window_event(") && lib.contains("WindowEvent::DragDrop(DragDropEvent::Drop"),
+        "handle drops with Builder::on_window_event and WindowEvent::DragDrop"
+    );
+}
+
 #[test]
 fn updates_are_signed_and_come_from_github_over_https() {
     let conf = load("tauri.conf.json");

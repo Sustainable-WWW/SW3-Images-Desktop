@@ -4,6 +4,18 @@ All notable changes to SW3 Images. The release workflow publishes each
 version's section below as its GitHub release notes, which the in-app update
 prompt also shows.
 
+## [0.1.2] — 2026-11-09
+
+Fixes drag and drop, which stopped working in 0.1.1.
+
+- **Dropping images and folders onto the window works again.** In 0.1.1
+  they were ignored, and images could only be added with "browse files".
+
+### For developers
+
+- A new test checks that dropped files reach the app's drop handler, so drag
+  and drop can't silently break again.
+
 ## [0.1.1] — 2026-09-25
 
 A big quality update. Every image is now checked for visible changes in both
