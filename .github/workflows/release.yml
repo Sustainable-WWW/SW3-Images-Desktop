@@ -104,8 +104,17 @@ jobs:
 
       # mozjpeg's x86 SIMD kernels are written in NASM assembly.
       - name: Install NASM
-        if: runner.os == 'Windows' || matrix.target == 'x86_64-apple-darwin'
+        if: runner.os == 'Windows'
         uses: ilammy/setup-nasm@v1
+
+      # setup-nasm only has Intel macOS binaries, which an Apple Silicon Mac
+      # can't run without Rosetta: use Homebrew's native NASM instead (it
+      # assembles Intel code just the same).
+      - name: Install NASM (macOS Intel build)
+        if: matrix.target == 'x86_64-apple-darwin'
+        run: |
+          command -v nasm >/dev/null || brew install nasm
+          nasm -v
 
       - uses: actions/setup-node@v5
         with:

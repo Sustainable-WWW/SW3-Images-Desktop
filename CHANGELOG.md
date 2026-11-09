@@ -4,6 +4,20 @@ All notable changes to SW3 Images. The release workflow publishes each
 version's section below as its GitHub release notes, which the in-app update
 prompt also shows.
 
+## [0.1.4] — 2026-11-09
+
+The version for Intel Macs, which 0.1.3 was missing.
+
+- **New: a version for Intel Macs.** Download the `_x64.dmg` for a Mac with
+  an Intel processor (macOS 11 Big Sur or later). 0.1.3 was meant to include
+  it, but its build failed.
+
+### For developers
+
+- The Intel Mac build uses Homebrew's native NASM on the self-hosted Apple
+  Silicon Mac. The setup-nasm action only ships Intel macOS binaries, which
+  can't run there without Rosetta.
+
 ## [0.1.3] — 2026-11-09
 
 SW3 Images now has a version for Intel Macs, and update checks use an updated
