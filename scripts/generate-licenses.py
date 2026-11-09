@@ -5,7 +5,8 @@ Writes THIRD-PARTY-LICENSES.md (repository) and ui/licenses.html (shown in
 the app under Help → Open-Source Licenses) from:
 
   * cargo-about: every Rust crate compiled into the app, with its license
-    text (install: cargo install cargo-about --locked --features cli);
+    text (install the version CI pins in .github/workflows/ci.yml:
+    cargo install cargo-about --version 0.9.2 --locked --features cli);
   * C libraries bundled inside those crates, whose own notices differ from
     the wrapper crate's license (libwebp incl. its patent grant, libdeflate);
   * the bundled fonts (SIL Open Font License).

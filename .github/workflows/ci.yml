@@ -79,9 +79,13 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
+      # Pinned: the committed notices are generated with this version, and a
+      # newer cargo-about can change the output (0.9.3 adds source excerpts
+      # from ring). To upgrade, bump it here and in scripts/generate-licenses.py
+      # and regenerate the notices.
       - uses: taiki-e/install-action@v2
         with:
-          tool: cargo-about
+          tool: cargo-about@0.9.2
 
       - name: Third-party license notices are up to date
         run: |
