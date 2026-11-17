@@ -64,7 +64,6 @@ export default {
       case "app_info":
         return { version: "0.1.0-dev", workers: 5, output: { path: "/Users/demo/Pictures/SW3 Compressed", label: "Pictures / SW3 Compressed" } };
       case "pick_images":
-      case "scan_paths":
         await new Promise((r) => setTimeout(r, 300));
         return { images: fakeImages(scans++ === 0 ? 128 : 6, scans * 1000), skipped: 0 };
       case "pick_output_dir":

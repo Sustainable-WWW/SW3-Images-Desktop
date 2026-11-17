@@ -4,6 +4,31 @@ All notable changes to SW3 Images. The release workflow publishes each
 version's section below as its GitHub release notes, which the in-app update
 prompt also shows.
 
+## [Unreleased]
+
+Dark mode, better contrast and a smoother start.
+
+- **Dark mode.** SW3 Images now follows your Mac's or PC's light or dark
+  appearance, and switches as soon as you change it. The About and license
+  windows follow it too.
+- **Easier to see and use.** Text, buttons, checkboxes, the focus outline
+  and the drop zone now meet the WCAG 2.2 AA contrast requirements in both
+  light and dark mode; several outlines were too faint before. Small buttons
+  are a little larger, and screen readers now announce the image list,
+  "Reading images…" and progress updates.
+- **Smoother start.** The window no longer shifts as it appears, and its
+  text shows up a little sooner.
+
+### For developers
+
+- All colours are tokens in `ui/styles.css`: a light set plus a
+  `prefers-color-scheme: dark` override, each pair checked against WCAG 2.2
+  AA.
+- The first-screen fonts are preloaded, `lib.js` is modulepreloaded, and
+  `ui/platform.js` sets the macOS title-bar class before the first paint.
+- Removed unused CSS, an unused element id and the dev mock's `scan_paths`
+  command.
+
 ## [0.1.4] — 2026-11-09
 
 The version for Intel Macs, which 0.1.3 was missing.

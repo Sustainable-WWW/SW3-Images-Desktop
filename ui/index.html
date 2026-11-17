@@ -2,9 +2,16 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
 <title>SW3 Images</title>
+<script src="platform.js"></script>
 <link rel="stylesheet" href="styles.css">
+<!-- Fonts for the first screen load alongside the CSS instead of after layout. -->
+<link rel="preload" href="fonts/work-sans-latin-400-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/work-sans-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/poppins-latin-600-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="preload" href="fonts/poppins-latin-700-normal.woff2" as="font" type="font/woff2" crossorigin>
+<link rel="modulepreload" href="lib.js">
 <script type="module" src="app.js"></script>
 </head>
 <body>
@@ -31,7 +38,7 @@
 
 <!-- ============================ Setup view ============================ -->
 <main class="view setup" id="setup">
-  <section class="card files" id="files-card">
+  <section class="card files">
     <!-- Empty state: one big drop target -->
     <div class="drop drop-empty" id="drop-empty">
       <div class="drop-icon big"><svg class="ico"><use href="#i-upload"/></svg></div>
@@ -50,13 +57,13 @@
       <p><strong id="count"></strong> · <span id="total-size"></span></p>
       <button type="button" class="btn-text" id="clear">Clear all</button>
     </div>
-    <div class="grid scroll" id="grid" hidden></div>
-    <div class="scanning" id="scanning" hidden>Reading images…</div>
+    <div class="grid scroll" id="grid" role="list" aria-label="Images to compress" hidden></div>
+    <div class="scanning" id="scanning" role="status" hidden>Reading images…</div>
   </section>
 
   <aside class="card options">
     <h2>Output size</h2>
-    <label class="choice" id="choice-original">
+    <label class="choice on" id="choice-original">
       <input type="radio" name="size" value="original" checked>
       <span class="mark radio"></span>
       <span class="choice-text"><strong>Original size</strong><small>Keep original dimensions</small></span>
@@ -97,7 +104,7 @@
   <section class="hero">
     <div class="hero-top">
       <div>
-        <p class="hero-label" id="hero-label"></p>
+        <p class="hero-label" id="hero-label" aria-live="polite"></p>
         <p class="hero-title" id="hero-title"></p>
       </div>
       <div class="hero-right">
@@ -105,7 +112,7 @@
         <p class="hero-eta" id="hero-eta"></p>
       </div>
     </div>
-    <div class="bar"><div class="bar-fill" id="hero-bar"></div></div>
+    <div class="bar" aria-hidden="true"><div class="bar-fill" id="hero-bar"></div></div>
     <p class="hero-stats">
       <span id="hero-bytes"></span>
       <span id="hero-saved"></span>

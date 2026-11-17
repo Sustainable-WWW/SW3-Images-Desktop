@@ -23,7 +23,11 @@ function tauriApi() {
 }
 
 const $ = (id) => document.getElementById(id);
-if (navigator.userAgent.includes("Mac")) document.documentElement.classList.add("mac");
+
+/** Write text only when it changed: no redundant DOM work, and live regions stay quiet. */
+function setText(node, text) {
+  if (node.textContent !== text) node.textContent = text;
+}
 
 // ------------------------------------------------------------------ state
 
@@ -490,19 +494,19 @@ function renderHero(job) {
   const { fraction, etaSeconds } = L.batchProgress(job.items, elapsed);
 
   const phase = job.running ? (job.stopping ? "Stopping" : "Compressing") : job.stopped ? "Stopped" : "Done";
-  $("hero-label").textContent = `${phase} · ${L.optionsLabel(job.opts)}`;
+  setText($("hero-label"), `${phase} · ${L.optionsLabel(job.opts)}`);
 
   let title;
   if (live) title = `${t.done + t.failed} of ${L.plural(total, "image")}`;
   else if (job.stopped) title = `${t.done} of ${total} compressed`;
   else if (t.failed === 0) title = `${L.plural(t.done, "image")} compressed`;
   else title = `${t.done} of ${total} compressed`;
-  $("hero-title").textContent = title;
+  setText($("hero-title"), title);
 
   // A stopped batch shows how much of the whole selection got processed.
   const shown = live ? fraction : job.stopped ? (t.done + t.failed) / total : 1;
   const pct = live ? Math.min(99, Math.floor(shown * 100)) : Math.floor(shown * 100);
-  $("hero-pct").textContent = `${pct}%`;
+  setText($("hero-pct"), `${pct}%`);
   $("hero-bar").style.width = `${shown * 100}%`;
 
   let eta;
@@ -511,7 +515,7 @@ function renderHero(job) {
     eta = `${job.stopped ? "Stopped after" : "Finished in"} ${L.formatDuration(elapsed)}`;
     if (t.failed > 0) eta = `${t.failed} failed · ${eta}`;
   }
-  $("hero-eta").textContent = eta;
+  setText($("hero-eta"), eta);
 
   const bytes = $("hero-bytes");
   if (t.done > 0) {

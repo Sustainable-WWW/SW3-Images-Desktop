@@ -94,6 +94,7 @@ def main():
         )
     page = (
         "<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n"
+        "<meta name=\"color-scheme\" content=\"light dark\">\n"
         "<title>Open-Source Licenses</title>\n<link rel=\"stylesheet\" href=\"styles.css\">\n"
         "<link rel=\"stylesheet\" href=\"about.css\">\n</head>\n<body class=\"licenses\">\n<main>\n"
         + "\n".join(body)
