@@ -2,12 +2,11 @@
 # for the in-app updater, and publishes them as a GitHub Release together with
 # the latest.json manifest the updater reads.
 #
-# Both macOS builds run on the self-hosted Mac (runner labels: self-hosted,
-# macOS, ARM64), one after the other; the Intel build is cross-compiled there
-# (no Rosetta needed). Windows builds on GitHub's runner. The Mac must be
-# awake with its runner online: otherwise the macOS builds wait in the queue
-# (up to 24 hours) and the release only has the Windows installer until they
-# have run.
+# All builds run on GitHub's runners; the Intel Mac build is cross-compiled on
+# the Apple Silicon one (no Rosetta needed). To build the Mac versions on the
+# self-hosted Mac instead, set their `os:` to [self-hosted, macOS, ARM64]: it
+# must then be awake with its runner online, or the macOS builds wait in the
+# queue (up to 24 hours) and the release only has the Windows installer.
 #
 # To release: bump `version` in src-tauri/Cargo.toml, describe the changes
 # under a matching heading in CHANGELOG.md (these become the release notes),
@@ -40,11 +39,11 @@ jobs:
       matrix:
         include:
           - name: macOS Apple Silicon
-            os: [self-hosted, macOS, ARM64]
+            os: macos-latest
             target: aarch64-apple-darwin
             args: --target aarch64-apple-darwin
           - name: macOS Intel
-            os: [self-hosted, macOS, ARM64]
+            os: macos-latest
             target: x86_64-apple-darwin
             args: --target x86_64-apple-darwin
           - name: Windows

@@ -1,7 +1,6 @@
 # Runs the full test suite on every push and pull request, on both platforms
 # the app ships for, plus dependency checks: known vulnerabilities, licenses
 # that allow redistribution, and up-to-date third-party license notices.
-# The macOS tests run on the self-hosted Mac (see `runs-on` below).
 name: CI
 
 on:
@@ -26,12 +25,12 @@ jobs:
         include:
           - name: macOS Apple Silicon
             os: macos-latest
-            self_hosted: true
+            # Set `self_hosted: true` to run these tests on the self-hosted Mac.
           - name: Windows
             os: windows-latest
-    # macOS runs on the self-hosted Mac (labels: self-hosted, macOS, ARM64),
-    # except pull requests from forks, which use GitHub's macOS runner so
-    # outside code doesn't run on the Mac. A pull request can edit this file,
+    # With self_hosted, macOS runs on the self-hosted Mac (labels: self-hosted,
+    # macOS, ARM64), except pull requests from forks, which use GitHub's macOS
+    # runner so outside code doesn't run on the Mac. A pull request can edit this file,
     # though: the real safeguard is requiring approval before fork pull
     # requests run workflows (Settings → Actions → General).
     runs-on: ${{ matrix.self_hosted && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "macOS", "ARM64"]') || matrix.os }}
