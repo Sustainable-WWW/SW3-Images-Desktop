@@ -4,7 +4,7 @@ All notable changes to SW3 Images. The release workflow publishes each
 version's section below as its GitHub release notes, which the in-app update
 prompt also shows.
 
-## [Unreleased]
+## [0.1.5] — 2026-11-21
 
 Dark mode, better contrast and a smoother start.
 
